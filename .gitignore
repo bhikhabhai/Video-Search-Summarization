@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv*/
+.env
+data/
+*.pt
+contact_sheet.png
+.pytest_cache/
+
+# ── Frontend (Next.js) ──
+frontend/node_modules/
+frontend/.next/
+frontend/next-env.d.ts
+
+model-cache/
+model-cache/*

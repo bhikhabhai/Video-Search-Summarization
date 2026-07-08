@@ -1,0 +1,8 @@
+.venv*/
+__pycache__/
+*.pyc
+.git/
+data/
+.env
+.pytest_cache/
+TODO.md

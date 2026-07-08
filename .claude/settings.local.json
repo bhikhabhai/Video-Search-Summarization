@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m compileall -q src tests)",
+      "Bash(python3 -c \"import numpy, cv2, pydantic\")",
+      "Bash(python3 -m venv .venv-test)",
+      "Bash(.venv-test/bin/pip install *)",
+      "Bash(.venv-test/bin/python -m pytest tests/ -q -m \"not slow\")",
+      "Bash(.venv-test/bin/python -)",
+      "Bash(.venv-test/bin/python -m pytest tests/ -q)",
+      "Bash(docker exec *)",
+      "Bash(find /usr/local/lib/python3.11/site-packages/gradio/templates -name \"*.html\" 2>/dev/null | head -3; docker exec vss_api_1 find /usr/local/lib/python3.11/site-packages/gradio -name \"Gallery.svelte\" 2>/dev/null | head -3)",
+      "Bash(grep -E '\\\\.\\(js|svelte|css\\)$')",
+      "Bash(grep -E '\\\\.\\(js|css\\)$')",
+      "Bash(python3 -c ' *)",
+      "Bash(node --version)",
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(docker-compose config *)",
+      "Bash(python3 -m compileall -q src/rag/vector_store.py src/api/main.py)",
+      "Bash(python3 -m compileall -q src/api/main.py)",
+      "Bash(python3 -m compileall -q src/inference/captioner.py src/config.py)",
+      "Bash(bash /tmp/claude-1000/-home-bhikhabhai-temp-Dev-VSS/6fa9020e-a6d1-4a82-8c16-ceecc6f5d9f5/scratchpad/test_ollama_vlm.sh)",
+      "Bash(python3 -m compileall -q src/inference/captioner.py)"
+    ]
+  }
+}

@@ -1,0 +1,49 @@
+services:
+  api:
+    build: .
+    command: >
+      sh -c "mkdir -p /root/.cache/ultralytics/Ultralytics &&
+             exec uvicorn src.api.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_CAPTION_BASE_URL=${OLLAMA_CAPTION_BASE_URL:-}
+      - CAPTION_OLLAMA_MODEL=${CAPTION_OLLAMA_MODEL:-qwen2.5vl}
+      - DATA_DIR=/app/data
+      - CHROMA_DIR=/app/data/chroma
+    volumes:
+      - ./model-cache:/root/.cache  # HF / torch / YOLO / CLIP weights survive restarts
+      - ./data:/app/data            # uploads, thumbnails, ChromaDB
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # reach a host-side Ollama on Linux
+    # ── GPU (optional) ────────────────────────────────────────
+    # Uncomment to pass an NVIDIA GPU through (requires the NVIDIA
+    # Container Toolkit). The app auto-detects CUDA at startup and
+    # falls back to CPU when absent — no config change needed.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Baked into the client bundle at build time. The browser calls the
+        # API on the host-published port, so this is localhost, not "api".
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+# Named volumes removed — all data is now bind-mounted to the host
+# so you can inspect / wipe it directly without going through Docker.

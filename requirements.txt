@@ -1,0 +1,40 @@
+# ── Backend / API ────────────────────────────────────────────
+fastapi~=0.115.0
+starlette>=0.40.0,<1.0.0
+uvicorn[standard]~=0.30
+python-multipart~=0.0.12
+pydantic~=2.9
+pydantic-settings~=2.5
+
+# ── Video / image processing ─────────────────────────────────
+ffmpeg-python~=0.2
+opencv-python-headless~=4.10
+numpy>=1.26,<2.0
+Pillow~=10.4
+
+# ── Inference ────────────────────────────────────────────────
+torch~=2.4
+torchvision~=0.19
+ultralytics~=8.3
+# Qwen2.5-VL support requires transformers >= 4.49.
+transformers>=4.49,<5
+accelerate~=1.0
+qwen-vl-utils~=0.0.8
+bitsandbytes>=0.44 ; platform_machine == "x86_64" and sys_platform == "linux"
+open-clip-torch~=2.26
+sentencepiece~=0.2
+
+# ── RAG ──────────────────────────────────────────────────────
+chromadb~=0.5
+rank-bm25~=0.2
+
+# ── LLM ──────────────────────────────────────────────────────
+anthropic~=0.39
+httpx~=0.27
+
+# ── UI ───────────────────────────────────────────────────────
+jinja2>=3.0,<3.1.5
+gradio~=4.44
+
+# ── Dev / tests ──────────────────────────────────────────────
+pytest~=8.3
