@@ -179,6 +179,33 @@ function Lightbox({
             </p>
           </div>
 
+          {frame.scene && (
+            <Detail label="Scene">
+              <p className="text-sm text-neutral-200">{frame.scene}</p>
+            </Detail>
+          )}
+
+          {frame.events && frame.events.length > 0 && (
+            <Detail label="Events">
+              <div className="flex flex-wrap gap-1.5">
+                {frame.events.map((e) => (
+                  <span
+                    key={e}
+                    className="rounded-full border border-amber-800 bg-amber-950/40 px-2.5 py-0.5 text-xs text-amber-300"
+                  >
+                    {e}
+                  </span>
+                ))}
+              </div>
+            </Detail>
+          )}
+
+          {frame.ocr_text && (
+            <Detail label="Text / plates (OCR)">
+              <p className="font-mono text-sm text-emerald-300">{frame.ocr_text}</p>
+            </Detail>
+          )}
+
           <div>
             <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
               Detected objects
@@ -190,7 +217,9 @@ function Lightbox({
                     key={label}
                     className="rounded-full border border-neutral-700 bg-neutral-800 px-2.5 py-0.5 text-xs text-neutral-200"
                   >
-                    {label}
+                    {frame.detection_counts?.[label]
+                      ? `${frame.detection_counts[label]}× ${label}`
+                      : label}
                   </span>
                 ))}
               </div>
@@ -215,6 +244,23 @@ function Lightbox({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Detail({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
+        {label}
+      </h4>
+      {children}
     </div>
   );
 }

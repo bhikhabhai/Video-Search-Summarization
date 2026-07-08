@@ -36,6 +36,8 @@ from src.config import configure_logging, get_settings
 from src.inference.captioner import Captioner
 from src.inference.detector import Detector
 from src.inference.embedder import Embedder
+from src.inference.ocr import OCRReader
+from src.inference.pose import PoseEstimator
 from src.ingestion.frame_extractor import FrameExtractor
 from src.ingestion.video_loader import VideoLoadError, load_video
 from src.models import (
@@ -68,6 +70,8 @@ class Pipeline:
         self.embedder = Embedder()
         self.detector = Detector()
         self.captioner = Captioner(embedder=self.embedder)
+        self.ocr = OCRReader()
+        self.pose = PoseEstimator()
         self.extractor = FrameExtractor()
         self.store = VectorStore()
         self.retriever = HybridRetriever(self.store, self.embedder)
@@ -118,6 +122,33 @@ def _thumbnail_b64(frame: ExtractedFrame, width: int = 480) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
+def _merge_ocr(ocr_lines: list[str], vlm_ocr: str) -> str:
+    """Combine dedicated-OCR text with the VLM's OCR, deduped, OCR-model first."""
+    seen: set[str] = set()
+    parts: list[str] = []
+    vlm_items = [s.strip() for s in vlm_ocr.split(";")] if vlm_ocr else []
+    for item in [*ocr_lines, *vlm_items]:
+        item = item.strip()
+        key = item.lower()
+        if item and key not in seen:
+            seen.add(key)
+            parts.append(item)
+    return "; ".join(parts)
+
+
+def _merge_events(pose_events: list[str], vlm_events: list[str]) -> list[str]:
+    """Union of rule-based pose events and VLM events, deduped (pose first)."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for event in [*pose_events, *vlm_events]:
+        event = str(event).strip()
+        key = event.lower()
+        if event and key not in seen:
+            seen.add(key)
+            merged.append(event)
+    return merged
+
+
 def _run_ingest(job_id: str, video_path: str, filename: str) -> None:
     """Full pipeline for one video. Runs inside the ingest worker thread."""
     status = JOBS[job_id]
@@ -144,18 +175,29 @@ def _run_ingest(job_id: str, video_path: str, filename: str) -> None:
         images = [f.pil_image for f in frames]
         detections = p.detector.detect_batch(images)
 
-        update(55, "captioning keyframes (guided by detections)")
-        captions = p.captioner.caption_frames(images, detections=detections)
+        update(55, "describing keyframes (scene/actions/OCR/events, guided by detections)")
+        descriptions = p.captioner.describe_frames(images, detections=detections)
 
-        update(70, "detecting actions/interactions between people")
-        actions_per_frame = p.captioner.caption_actions(images, detections=detections)
+        if p.ocr.enabled:
+            update(75, f"reading text/plates ({p.ocr.backend} OCR)")
+            ocr_per_frame = p.ocr.read_batch(images)
+        else:
+            ocr_per_frame = [[] for _ in images]
+
+        if p.pose.enabled:
+            update(80, "detecting pose-based events (fall/fight/running)")
+            pose_events_per_frame = p.pose.events_batch(images)
+        else:
+            pose_events_per_frame = [[] for _ in images]
 
         update(85, "embedding keyframes")
         embeddings = p.embedder.embed_images(images)
 
         update(95, "writing to vector store")
         records = []
-        for frame, caption, dets, actions in zip(frames, captions, detections, actions_per_frame):
+        for frame, desc, dets, ocr_lines, pose_events in zip(
+            frames, descriptions, detections, ocr_per_frame, pose_events_per_frame
+        ):
             counts: dict[str, int] = {}
             for d in dets:
                 counts[d.label] = counts.get(d.label, 0) + 1
@@ -164,10 +206,15 @@ def _run_ingest(job_id: str, video_path: str, filename: str) -> None:
                     video_id=meta.video_id,
                     frame_idx=frame.frame_idx,
                     timestamp_sec=frame.timestamp_sec,
-                    caption=caption,
+                    caption=desc.get("caption", ""),
                     detection_labels=sorted(counts.keys()),
                     detection_counts=counts,
-                    actions=actions,
+                    actions=desc.get("actions", []),
+                    scene=desc.get("scene", ""),
+                    # Dedicated OCR takes precedence; fall back to the VLM's OCR.
+                    ocr_text=_merge_ocr(ocr_lines, desc.get("ocr_text", "")),
+                    # Rule-based pose events merged with the VLM's events.
+                    events=_merge_events(pose_events, desc.get("events", [])),
                     thumbnail_b64=_thumbnail_b64(frame),
                 )
             )

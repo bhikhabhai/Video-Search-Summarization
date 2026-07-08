@@ -22,7 +22,13 @@
       "Bash(python3 -m compileall -q src/api/main.py)",
       "Bash(python3 -m compileall -q src/inference/captioner.py src/config.py)",
       "Bash(bash /tmp/claude-1000/-home-bhikhabhai-temp-Dev-VSS/6fa9020e-a6d1-4a82-8c16-ceecc6f5d9f5/scratchpad/test_ollama_vlm.sh)",
-      "Bash(python3 -m compileall -q src/inference/captioner.py)"
+      "Bash(python3 -m compileall -q src/inference/captioner.py)",
+      "Bash(python3 -m compileall -q src/inference/captioner.py src/api/main.py src/rag/vector_store.py src/rag/summariser.py src/rag/retriever.py src/models.py)",
+      "Bash(python3 -m pytest tests/test_structured_caption.py -q)",
+      "Bash(docker cp *)",
+      "Bash(python3 -m compileall -q src/inference/ocr.py src/api/main.py src/config.py)",
+      "Bash(python3 -m compileall -q src)",
+      "Bash(python3 -m compileall -q src/inference/pose.py src/api/main.py src/config.py)"
     ]
   }
 }

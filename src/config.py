@@ -55,7 +55,14 @@ class Settings(BaseSettings):
     # capable GPU is present, else BLIP-base).
     caption_backend: str = "qwen"
     qwen_vl_model: str = "Qwen/Qwen2.5-VL-3B-Instruct"
-    caption_max_new_tokens: int = 128
+    # Concurrent requests for the network (Ollama) caption/OCR path only. Local
+    # CPU/GPU models ignore this — one inference already uses all cores, so
+    # parallel threads there just contend. Raise if your Ollama server (or a
+    # pool of them) can serve requests in parallel.
+    ollama_concurrency: int = 4
+    # Structured JSON needs headroom or it truncates mid-object; 256 is a safe
+    # floor. Raise for very detailed frames; lower to speed up CPU inference.
+    caption_max_new_tokens: int = 256
     # Bound Qwen's vision-token budget to keep CPU inference tractable.
     qwen_min_pixels: int = 256 * 28 * 28
     qwen_max_pixels: int = 768 * 28 * 28
@@ -63,6 +70,25 @@ class Settings(BaseSettings):
     blip_base_model: str = "Salesforce/blip-image-captioning-base"
     vram_threshold_gb: float = 8.0     # below this, fall back to BLIP base
     caption_dedup_threshold: float = 0.92
+
+    # ── Pose / action detection (fall / fight / running) ───────
+    # Rule-based events from YOLO-pose keypoints, independent of the VLM.
+    pose_enabled: bool = False
+    pose_model: str = "yolov8n-pose.pt"
+    pose_confidence: float = 0.3        # person detection confidence
+    pose_kp_confidence: float = 0.3     # per-keypoint confidence floor
+    crowd_person_threshold: int = 5     # >= this many people => "crowding"
+
+    # ── OCR (dedicated text / number-plate reading) ────────────
+    # Backend: "none" (rely on the VLM caption's OCR), "paddle" (local
+    # PaddleOCR), or "ollama" (send the frame to an Ollama vision model with an
+    # OCR-only prompt). Runs independently of the captioner.
+    ocr_backend: str = "none"
+    ocr_languages: str = "en"          # PaddleOCR language code(s)
+    ocr_min_confidence: float = 0.5    # PaddleOCR: drop lines below this score
+    # Ollama OCR endpoint/model; empty URL falls back to the caption/main server.
+    ocr_ollama_base_url: str = ""
+    ocr_ollama_model: str = "qwen2.5vl"
 
     # ── Embeddings (CLIP) ──────────────────────────────────────
     clip_model: str = "ViT-L-14"

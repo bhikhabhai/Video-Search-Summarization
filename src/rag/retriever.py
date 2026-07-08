@@ -99,7 +99,20 @@ class HybridRetriever:
                 return tokens
             return [lbl.replace(" ", "_") for lbl in frame.detection_labels]
 
-        corpus = [_tokenize(f"{f.caption} {' '.join(_label_tokens(f))}") for f in frames]
+        # Index caption + expanded labels + OCR text + events + actions so
+        # lexical queries (a plate number, "handover", "fall") can hit directly.
+        corpus = [
+            _tokenize(
+                " ".join([
+                    f.caption,
+                    " ".join(_label_tokens(f)),
+                    f.ocr_text,
+                    " ".join(f.events),
+                    " ".join(f.actions),
+                ])
+            )
+            for f in frames
+        ]
         query_tokens = _tokenize(query)
         if any(corpus) and query_tokens:
             bm25 = BM25Okapi([tokens or ["<empty>"] for tokens in corpus])

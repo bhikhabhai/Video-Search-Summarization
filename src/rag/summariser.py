@@ -121,10 +121,12 @@ def _format_window(frames: list[RetrievedFrame]) -> str:
             labels = f" [objects: {', '.join(frame.detection_labels)}]"
         else:
             labels = ""
-        actions = (
-            f" [actions: {'; '.join(frame.actions)}]" if frame.actions else ""
+        actions = f" [actions: {'; '.join(frame.actions)}]" if frame.actions else ""
+        events = f" [events: {', '.join(frame.events)}]" if frame.events else ""
+        ocr = f" [text: {frame.ocr_text}]" if frame.ocr_text else ""
+        lines.append(
+            f"- t={frame.timestamp_sec:.1f}s: {frame.caption}{labels}{actions}{events}{ocr}"
         )
-        lines.append(f"- t={frame.timestamp_sec:.1f}s: {frame.caption}{labels}{actions}")
     return "\n".join(lines)
 
 

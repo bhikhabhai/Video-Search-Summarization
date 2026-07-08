@@ -22,6 +22,9 @@ CLIP cosine similarity between the new caption and the previous one exceeds
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 import logging
 from collections import Counter
 from typing import Any
@@ -36,7 +39,7 @@ from src.models import Detection
 logger = logging.getLogger(__name__)
 
 
-# Single instruction that pulls out everything we care about per frame.
+# Free-form instruction (BLIP-2 / fallback path).
 _QWEN_CAPTION_INSTRUCTION = (
     "You are analysing a single frame from a surveillance video. "
     "Describe it in 1-3 concise sentences, stating concretely:\n"
@@ -47,6 +50,186 @@ _QWEN_CAPTION_INSTRUCTION = (
     "- any clearly legible text or vehicle number plates (read them out).\n"
     "Only state what is visibly certain — do not speculate."
 )
+
+# Structured instruction — asks the VLM for a strict JSON object we can index
+# field-by-field (scene / people / interactions / objects / vehicles / OCR /
+# events). Far better for retrieval + summarisation than free-form prose.
+_STRUCTURED_INSTRUCTION = (
+    "You are analysing a single frame from a surveillance video. "
+    "Return ONLY a JSON object (no prose, no markdown fences) with exactly these keys:\n"
+    "{\n"
+    '  "scene": "<location type, indoor/outdoor, lighting>",\n'
+    '  "people": [{"count": <int>, "activity": "<what they are doing>", "clothing": "<colours>"}],\n'
+    '  "interactions": ["<person-person or person-object interactions>"],\n'
+    '  "objects": ["<notable or carried objects>"],\n'
+    '  "vehicles": [{"type": "<car/bike/truck/...>", "color": "<colour>", "plate": "<plate text or empty>"}],\n'
+    '  "text": ["<legible signs, labels, number plates>"],\n'
+    '  "events": ["<notable events: object handover, fall, fight, running, crowding, intrusion, loitering>"]\n'
+    "}\n"
+    "Only include visible facts. Use empty arrays or empty strings when unsure. Do not guess."
+)
+
+
+# ── Structured-JSON parsing (VLM-agnostic, unit-testable) ──────
+
+
+def _as_str_list(value: Any) -> list[str]:
+    """Coerce an arbitrary JSON value into a clean list of non-empty strings."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    text = str(value).strip()
+    return [text] if text else []
+
+
+def extract_json(text: str) -> dict:
+    """Best-effort extraction of a single JSON object from VLM output.
+
+    Scans from the first ``{`` tracking string/bracket state so it ignores
+    markdown fences and surrounding prose. Crucially, it **repairs truncated**
+    output (a common failure when the token budget runs out mid-JSON) by
+    closing an unterminated string, dropping a dangling comma, and appending
+    the missing closing brackets. Returns ``{}`` only when nothing salvages.
+    """
+    if not text:
+        return {}
+    start = text.find("{")
+    if start == -1:
+        return {}
+    body = text[start:]
+
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    end: int | None = None
+    for i, ch in enumerate(body):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                end = i + 1
+                break
+
+    if end is not None:
+        candidate = body[:end]
+    else:
+        # Truncated output: close the open string, drop any trailing comma,
+        # then append the outstanding closers (innermost first).
+        candidate = body + ('"' if in_str else "")
+        candidate = candidate.rstrip().rstrip(",")
+        candidate += "".join(reversed(stack))
+
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _synthesize_caption(
+    scene: str,
+    activities: list[str],
+    interactions: list[str],
+    objects: list[str],
+    vehicles: list[str],
+    events: list[str],
+    ocr_text: str,
+) -> str:
+    """Flatten structured fields into one readable sentence for embed + display."""
+    parts: list[str] = []
+    if scene:
+        parts.append(scene[0].upper() + scene[1:] + ".")
+    if activities:
+        parts.append("People: " + "; ".join(activities) + ".")
+    if interactions:
+        parts.append("Interactions: " + "; ".join(interactions) + ".")
+    if objects:
+        parts.append("Objects: " + ", ".join(objects) + ".")
+    if vehicles:
+        parts.append("Vehicles: " + "; ".join(vehicles) + ".")
+    if events:
+        parts.append("Events: " + ", ".join(events) + ".")
+    if ocr_text:
+        parts.append("Text: " + ocr_text + ".")
+    return " ".join(parts).strip()
+
+
+def normalize_structured(data: dict) -> dict:
+    """Turn a parsed VLM JSON object into our stored fields.
+
+    Returns keys: ``caption`` (synthesized NL), ``scene``, ``actions``
+    (activities + interactions), ``ocr_text``, ``events``. Defensive against
+    the many shapes VLMs emit (dicts vs strings, singular vs plural keys).
+    """
+    scene = data.get("scene", "")
+    if isinstance(scene, dict):
+        scene = ", ".join(f"{k}: {v}" for k, v in scene.items())
+    scene = str(scene).strip()
+
+    activities: list[str] = []
+    people = data.get("people", [])
+    if isinstance(people, list):
+        for person in people:
+            if isinstance(person, dict):
+                act = person.get("activity") or person.get("activities")
+                if act:
+                    activities.append(str(act).strip())
+            elif str(person).strip():
+                activities.append(str(person).strip())
+
+    interactions = _as_str_list(data.get("interactions") or data.get("interaction"))
+    objects = _as_str_list(data.get("objects"))
+    events = _as_str_list(data.get("events"))
+    text_items = _as_str_list(data.get("text"))
+
+    vehicle_strs: list[str] = []
+    plates: list[str] = []
+    vehicles = data.get("vehicles", [])
+    if isinstance(vehicles, list):
+        for veh in vehicles:
+            if isinstance(veh, dict):
+                desc = " ".join(
+                    p for p in (str(veh.get("color", "")).strip(),
+                                str(veh.get("type", "")).strip()) if p
+                )
+                plate = str(veh.get("plate", "")).strip()
+                if plate:
+                    plates.append(plate)
+                    desc = f"{desc} (plate {plate})".strip()
+                if desc:
+                    vehicle_strs.append(desc)
+            elif str(veh).strip():
+                vehicle_strs.append(str(veh).strip())
+
+    ocr_text = "; ".join(text_items + plates)
+    actions = activities + interactions
+    caption = _synthesize_caption(
+        scene, activities, interactions, objects, vehicle_strs, events, ocr_text
+    )
+    return {
+        "caption": caption,
+        "scene": scene,
+        "actions": actions,
+        "ocr_text": ocr_text,
+        "events": events,
+    }
+
+
+def _empty_description(caption: str = "") -> dict:
+    return {"caption": caption, "scene": "", "actions": [], "ocr_text": "", "events": []}
 
 
 class Captioner:
@@ -63,18 +246,31 @@ class Captioner:
         self.blip_base_name = settings.blip_base_model
         self.vram_threshold_gb = settings.vram_threshold_gb
         self.dedup_threshold = settings.caption_dedup_threshold
+        # Remote Ollama vision server (CAPTION_BACKEND=ollama). Falls back to the
+        # main Ollama URL when no dedicated caption server is configured.
+        caption_url = settings.ollama_caption_base_url or settings.ollama_base_url
+        self.ollama_caption_url = caption_url.rstrip("/")
+        self.ollama_caption_model = settings.ollama_caption_model
         # Shared with the pipeline's embedder so CLIP loads only once.
         self._embedder = embedder or Embedder()
         self._model: Any = None
         self._processor: Any = None
         self._device = "cpu"
-        # "qwen" | "blip2" | "blip"
+        # "qwen" | "blip2" | "blip" | "ollama"
         self._backend = ""
 
     # ── Model loading ──────────────────────────────────────────
 
     def _load(self) -> None:
-        if self._model is not None:
+        # Ollama is a remote HTTP service — nothing to load locally.
+        if self._backend == "ollama" or self._model is not None:
+            return
+        if self.backend_pref == "ollama":
+            logger.info(
+                "Caption backend=ollama: using %s at %s",
+                self.ollama_caption_model, self.ollama_caption_url,
+            )
+            self._backend = "ollama"
             return
         device = get_device()
         vram = get_vram_gb()
@@ -188,13 +384,10 @@ class Captioner:
             parts.append(f"{n} {plural}")
         return ", ".join(parts)
 
-    def _caption_qwen(self, image: Image.Image, hint: str) -> str:
+    def _qwen_generate(self, image: Image.Image, prompt: str) -> str:
+        """Run one Qwen2.5-VL generation for an arbitrary text prompt + image."""
         import torch
         from qwen_vl_utils import process_vision_info
-
-        prompt = _QWEN_CAPTION_INSTRUCTION
-        if hint:
-            prompt += f"\n\nAn object detector reported: {hint}."
 
         messages = [
             {
@@ -227,6 +420,39 @@ class Captioner:
         )[0]
         return " ".join(text_out.split()).strip()
 
+    def _ollama_generate(self, image: Image.Image, prompt: str, force_json: bool = False) -> str:
+        """Run one caption against the remote Ollama vision model."""
+        import httpx
+
+        buf = io.BytesIO()
+        image.convert("RGB").save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+
+        payload: dict[str, Any] = {
+            "model": self.ollama_caption_model,
+            "messages": [{"role": "user", "content": prompt, "images": [b64]}],
+            "stream": False,
+            "options": {"num_predict": self.max_new_tokens},
+        }
+        if force_json:
+            # Ask Ollama to constrain the decoder to valid JSON.
+            payload["format"] = "json"
+
+        resp = httpx.post(f"{self.ollama_caption_url}/api/chat", json=payload, timeout=180)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Ollama caption request to {self.ollama_caption_url} for model "
+                f"'{self.ollama_caption_model}' failed ({resp.status_code}): {resp.text}"
+            )
+        content = resp.json()["message"]["content"]
+        return " ".join(content.split()).strip()
+
+    def _caption_qwen(self, image: Image.Image, hint: str) -> str:
+        prompt = _QWEN_CAPTION_INSTRUCTION
+        if hint:
+            prompt += f"\n\nAn object detector reported: {hint}."
+        return self._qwen_generate(image, prompt)
+
     def _caption_blip(self, image: Image.Image, hint: str = "") -> str:
         import torch
 
@@ -258,7 +484,86 @@ class Captioner:
     def _caption_one(self, image: Image.Image, hint: str = "") -> str:
         if self._backend == "qwen":
             return self._caption_qwen(image, hint)
+        if self._backend == "ollama":
+            prompt = _QWEN_CAPTION_INSTRUCTION
+            if hint:
+                prompt += f"\n\nAn object detector reported: {hint}."
+            return self._ollama_generate(image, prompt)
         return self._caption_blip(image, hint)
+
+    # ── Structured description (VLM backends) ──────────────────
+
+    def _describe_one(self, image: Image.Image, hint: str) -> dict:
+        """Return structured fields for one frame.
+
+        VLM backends (qwen/ollama) are asked for JSON and normalised; if the
+        JSON can't be parsed the raw text becomes the caption. BLIP can't follow
+        the schema, so it yields a free-form caption with empty structured fields.
+        """
+        if self._backend not in ("qwen", "ollama"):
+            return _empty_description(self._caption_blip(image, hint))
+
+        prompt = _STRUCTURED_INSTRUCTION
+        if hint:
+            prompt += f"\n\nAn object detector reported: {hint}."
+
+        if self._backend == "ollama":
+            raw = self._ollama_generate(image, prompt, force_json=True)
+        else:
+            raw = self._qwen_generate(image, prompt)
+
+        data = extract_json(raw)
+        if not data:
+            # VLM didn't return usable JSON — keep the raw text as the caption.
+            logger.warning("Structured caption JSON parse failed; using raw text")
+            return _empty_description(raw)
+        return normalize_structured(data)
+
+    def describe_frames(
+        self,
+        images: list[Image.Image],
+        detections: list[list[Detection]] | None = None,
+    ) -> list[dict]:
+        """Structured per-frame descriptions (scene/actions/ocr_text/events + caption).
+
+        Deduplicates near-identical consecutive frames (by caption CLIP cosine),
+        reusing the previous description to avoid embedding-store noise. Per-frame
+        failures yield an empty description rather than aborting the batch.
+        """
+        self._load()
+        results: list[dict] = []
+        prev: dict | None = None
+        prev_vec: np.ndarray | None = None
+
+        for i, image in enumerate(images):
+            hint = self._build_hint(detections[i]) if detections else ""
+            try:
+                fields = self._describe_one(image, hint)
+            except Exception:
+                logger.exception("Description failed on frame %d; using empty", i)
+                results.append(_empty_description())
+                continue
+
+            caption = fields.get("caption", "").strip()
+            if caption and prev_vec is not None and prev is not None:
+                try:
+                    vec = self._embedder.embed_text(caption)
+                    if float(vec @ prev_vec) > self.dedup_threshold:
+                        results.append(prev)  # reuse previous description verbatim
+                        continue
+                    prev_vec = vec
+                except Exception:
+                    prev_vec = None
+            elif caption:
+                try:
+                    prev_vec = self._embedder.embed_text(caption)
+                except Exception:
+                    prev_vec = None
+
+            prev = fields
+            results.append(fields)
+
+        return results
 
     def caption_frames(
         self,
@@ -329,8 +634,8 @@ class Captioner:
         """
         self._load()
 
-        if self._backend == "qwen":
-            # Actions are captured in the primary caption already.
+        if self._backend in ("qwen", "ollama"):
+            # Actions are captured in the primary structured caption already.
             return [[] for _ in images]
 
         results: list[list[str]] = []

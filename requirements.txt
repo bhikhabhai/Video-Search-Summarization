@@ -24,6 +24,12 @@ bitsandbytes>=0.44 ; platform_machine == "x86_64" and sys_platform == "linux"
 open-clip-torch~=2.26
 sentencepiece~=0.2
 
+# ── OCR (only needed when OCR_BACKEND=paddle; ollama backend needs neither) ──
+# Uncomment to enable local PaddleOCR. These are large; the ollama OCR backend
+# is a lighter option that reuses your vision server.
+paddleocr>=2.7
+paddlepaddle>=2.6
+
 # ── RAG ──────────────────────────────────────────────────────
 chromadb~=0.5
 rank-bm25~=0.2

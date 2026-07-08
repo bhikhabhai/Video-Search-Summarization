@@ -35,10 +35,13 @@ def as_stream(frames: list[np.ndarray]) -> list[tuple[int, float, np.ndarray]]:
 
 @pytest.fixture()
 def extractor() -> FrameExtractor:
+    # max_gap_sec=inf disables the time-based fallback so these tests isolate the
+    # dual-threshold scene-cut logic. The fallback has its own test below.
     return FrameExtractor(
         diff_threshold=0.12,
         hist_threshold=0.35,
         min_scene_gap_sec=1.5,
+        max_gap_sec=float("inf"),
         analysis_fps=FPS,
         max_keyframes=100,
     )
@@ -93,7 +96,7 @@ class TestDualThreshold:
         (hue/saturation) barely moves — dual-threshold must NOT fire."""
         extractor = FrameExtractor(
             diff_threshold=0.10, hist_threshold=0.35, min_scene_gap_sec=0.0,
-            analysis_fps=FPS,
+            max_gap_sec=float("inf"), analysis_fps=FPS,
         )
         dark = [solid_frame((60, 60, 60))] * 10
         bright = [solid_frame((160, 160, 160))] * 10  # same grey hue, brighter
@@ -146,3 +149,20 @@ class TestMaxKeyframes:
         ]
         keyframes = extractor.extract_from_arrays(as_stream(frames))
         assert len(keyframes) == 5
+
+
+class TestMaxGapFallback:
+    def test_static_scene_sampled_by_time(self) -> None:
+        """A static camera (no scene cut) is still sampled every max_gap_sec so
+        activity in an unchanging background isn't missed."""
+        extractor = FrameExtractor(
+            diff_threshold=0.12, hist_threshold=0.35, min_scene_gap_sec=1.0,
+            max_gap_sec=3.0, analysis_fps=FPS, max_keyframes=100,
+        )
+        # 12 s of an identical frame -> forced keyframes at t=0, 3, 6, 9.
+        frames = [solid_frame((90, 90, 90))] * int(12 * FPS)
+        keyframes = extractor.extract_from_arrays(as_stream(frames))
+        assert len(keyframes) == 4
+        timestamps = [kf.timestamp_sec for kf in keyframes]
+        gaps = [b - a for a, b in zip(timestamps, timestamps[1:])]
+        assert all(gap == pytest.approx(3.0) for gap in gaps)

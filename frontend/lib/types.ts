@@ -13,6 +13,11 @@ export interface Frame {
   timestamp_sec: number;
   caption: string;
   detection_labels: string[];
+  detection_counts?: Record<string, number>;
+  actions?: string[];
+  scene?: string;
+  ocr_text?: string;
+  events?: string[];
   thumbnail_b64: string;
   score: number;
 }

@@ -62,8 +62,12 @@ class FrameRecord(BaseModel):
     detection_labels: list[str] = Field(default_factory=list)
     # Per-class object counts, e.g. {"person": 3, "car": 1}.
     detection_counts: dict[str, int] = Field(default_factory=dict)
-    # VQA-derived action/interaction descriptions, e.g. ["shaking hands", "walking"]
+    # VLM-derived people activities + person/object interactions.
     actions: list[str] = Field(default_factory=list)
+    # Structured VLM fields (see Captioner.describe_frames).
+    scene: str = ""                                        # location / indoor-outdoor / lighting
+    ocr_text: str = ""                                     # legible signs, labels, number plates
+    events: list[str] = Field(default_factory=list)        # handover, fall, fight, running, ...
     thumbnail_b64: str = ""
 
 
@@ -104,8 +108,12 @@ class RetrievedFrame(BaseModel):
     detection_labels: list[str] = Field(default_factory=list)
     # Per-class object counts, e.g. {"person": 3, "car": 1}.
     detection_counts: dict[str, int] = Field(default_factory=dict)
-    # VQA-derived action/interaction descriptions.
+    # VLM-derived people activities + person/object interactions.
     actions: list[str] = Field(default_factory=list)
+    # Structured VLM fields (see Captioner.describe_frames).
+    scene: str = ""
+    ocr_text: str = ""
+    events: list[str] = Field(default_factory=list)
     thumbnail_b64: str = ""
     score: float = 0.0
 

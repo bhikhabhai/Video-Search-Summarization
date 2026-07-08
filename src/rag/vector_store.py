@@ -66,6 +66,9 @@ class VectorStore:
                     "detection_labels": ",".join(r.detection_labels),
                     "detection_counts": json.dumps(r.detection_counts),
                     "actions": json.dumps(r.actions),
+                    "scene": r.scene,
+                    "ocr_text": r.ocr_text,
+                    "events": json.dumps(r.events),
                     "thumbnail_b64": r.thumbnail_b64,
                 }
                 for r in records
@@ -86,6 +89,11 @@ class VectorStore:
             actions: list[str] = json.loads(actions_raw) if actions_raw else []
         except (json.JSONDecodeError, TypeError):
             actions = []
+        events_raw = meta.get("events", "[]")
+        try:
+            events: list[str] = json.loads(events_raw) if events_raw else []
+        except (json.JSONDecodeError, TypeError):
+            events = []
         return RetrievedFrame(
             video_id=str(meta["video_id"]),
             frame_idx=int(meta["frame_idx"]),
@@ -94,6 +102,9 @@ class VectorStore:
             detection_labels=labels,
             detection_counts=counts,
             actions=actions,
+            scene=str(meta.get("scene", "")),
+            ocr_text=str(meta.get("ocr_text", "")),
+            events=events,
             thumbnail_b64=str(meta.get("thumbnail_b64", "")),
             score=round(score, 4),
         )
