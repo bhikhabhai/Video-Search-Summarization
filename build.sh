@@ -44,8 +44,12 @@ fi
 echo "Using: ${COMPOSE}"
 
 # ── Build & run ───────────────────────────────────────────────
+# Normal path: `up --build` recreates changed containers in place — no `down`
+# needed. For a clean rebuild we tear down first so containers are recreated
+# fresh (also sidesteps the ContainerConfig bug in docker-compose v1).
 if [ "${NO_CACHE}" -eq 1 ]; then
-  echo "Building images with --no-cache (clean rebuild)..."
+  echo "Tearing down and rebuilding with --no-cache (clean rebuild)..."
+  ${COMPOSE} down
   ${COMPOSE} build --no-cache
   ${COMPOSE} up -d
 else
