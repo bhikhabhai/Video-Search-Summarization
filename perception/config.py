@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # parallel threads there just contend. Raise if your Ollama server (or a
     # pool of them) can serve requests in parallel.
     ollama_concurrency: int = 4
+    # Local Qwen2.5-VL batch size: frames captioned per forward pass. >1 keeps
+    # the CPU/GPU busier per call (faster throughput) but raises peak RAM/VRAM.
+    # Default 1 (no batching); raise cautiously if you have memory headroom.
+    caption_batch_size: int = 1
     # Structured JSON needs headroom or it truncates mid-object; 256 is a safe
     # floor. Raise for very detailed frames; lower to speed up CPU inference.
     caption_max_new_tokens: int = 256

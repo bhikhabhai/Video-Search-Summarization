@@ -1,30 +1,37 @@
+# Mini-VSS — single image containing both layers:
+#   perception/  → video ingestion + vision inference (YOLO, VLM, OCR, pose, CLIP)
+#   retrieval/   → vector store, hybrid retrieval, summariser, FastAPI app
 FROM python:3.11-slim
 
-# ffmpeg: frame extraction / probing
-# libgl1 + libglib2.0-0: OpenCV runtime deps
+# System deps: ffmpeg (decode/probe), libgl1 + libglib2.0-0 (OpenCV runtime).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install dependencies first so code changes don't bust the layer cache.
+# Install Python deps first so code changes don't bust this (slow) layer.
 COPY requirements.txt .
 RUN pip install --no-cache-dir --timeout 300 --retries 5 -r requirements.txt
 
-ARG CACHEBUST=0
-COPY src/ src/
-COPY tests/ tests/
+# Copy both application layers into the image.
+COPY perception/ perception/
+COPY retrieval/ retrieval/
 
-# Model weights (HuggingFace, torch hub, ultralytics, open_clip) all cache
-# under /root/.cache — mounted as a named volume in docker-compose so they
-# survive container rebuilds.
-ENV HF_HOME=/root/.cache/huggingface \
-    TORCH_HOME=/root/.cache/torch \
-    YOLO_CONFIG_DIR=/root/.cache/ultralytics \
-    PYTHONUNBUFFERED=1
+# Model weights load from the mounted model-cache volume (see docker-compose.yml),
+# so nothing re-downloads across rebuilds. HuggingFace/Transformers, torch, and
+# Ultralytics all point into it.
+#
+# NOTE: data/ (uploads, thumbs, chroma) is deliberately NOT copied — it is a
+# runtime bind-mount volume, never baked into the image.
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/app/model-cache/huggingface \
+    TRANSFORMERS_CACHE=/app/model-cache/huggingface \
+    TORCH_HOME=/app/model-cache/torch \
+    YOLO_CONFIG_DIR=/app/model-cache/ultralytics
 
-EXPOSE 8000 7860
+EXPOSE 8000
 
-# Default command: the API. The UI service overrides this in docker-compose.
-CMD ["uvicorn", "src.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# FastAPI app lives at retrieval/api/main.py after the restructure.
+CMD ["uvicorn", "retrieval.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

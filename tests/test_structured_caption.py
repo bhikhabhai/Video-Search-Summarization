@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.inference.captioner import extract_json, normalize_structured
+from perception.inference.captioner import extract_json, normalize_structured
 
 
 class TestExtractJson:
@@ -84,10 +84,32 @@ class TestNormalizeStructured:
             "events": [],
         }
 
-    def test_scene_as_dict(self):
+    def test_scene_as_dict_joins_values_only(self):
         out = normalize_structured({"scene": {"location": "street", "lighting": "night"}})
-        assert "location: street" in out["scene"]
-        assert "lighting: night" in out["scene"]
+        # Values only — no "location:" / "lighting:" key noise.
+        assert out["scene"] == "street, night"
+        assert "location" not in out["scene"]
+
+    def test_objects_as_dicts_are_flattened(self):
+        # A VLM sometimes puts vehicle dicts inside `objects` — must not render
+        # as raw {'type': ...} reprs.
+        out = normalize_structured({
+            "objects": [
+                {"type": "car", "color": "gray", "plate": ""},
+                {"type": "truck", "color": "black", "plate": ""},
+            ],
+        })
+        assert "{" not in out["caption"]
+        assert "gray car" in out["caption"]
+        assert "black truck" in out["caption"]
+
+    def test_objects_deduped_against_vehicles(self):
+        out = normalize_structured({
+            "objects": [{"type": "car", "color": "white"}],
+            "vehicles": [{"type": "car", "color": "white"}],
+        })
+        # "white car" should appear once (as a vehicle), not in both sections.
+        assert out["caption"].count("white car") == 1
 
     def test_singular_interaction_key(self):
         out = normalize_structured({"interaction": "handshake"})

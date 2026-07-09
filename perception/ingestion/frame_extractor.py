@@ -42,8 +42,8 @@ import ffmpeg
 import numpy as np
 from PIL import Image
 
-from src.config import get_settings
-from src.models import ExtractedFrame, VideoMeta
+from perception.config import get_settings
+from perception.models import ExtractedFrame, VideoMeta
 
 logger = logging.getLogger(__name__)
 
@@ -258,8 +258,8 @@ def save_contact_sheet(
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
-    from src.ingestion.video_loader import load_video
+    from perception.config import configure_logging
+    from perception.ingestion.video_loader import load_video
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Extract keyframes and save a contact sheet")

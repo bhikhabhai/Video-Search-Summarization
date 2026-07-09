@@ -1,197 +1,189 @@
 # 🎬 Mini-VSS — Video Search & Summarization
 
-A deployable, end-to-end **video understanding stack** that intentionally mirrors the
-architecture of NVIDIA's VSS Blueprint at a fraction of the complexity. Upload a short
-video, then chat with it: ask natural-language questions ("when does a person appear in
-a red jacket?"), retrieve semantic clips (timestamp + thumbnail), or stream a full
+A deployable, end-to-end **video-understanding stack** that mirrors the shape of
+NVIDIA's VSS Blueprint at a fraction of the complexity. Upload a short video, then
+chat with it: ask natural-language questions ("when does a person appear in a red
+jacket?"), retrieve semantic clips (timestamp + thumbnail), or stream a full
 summary — all from a browser.
 
-Runs on a **single GPU or CPU-only** (GPU is auto-detected), fully offline if you want
-(local Ollama fallback), and starts with one command.
+Runs on a **single GPU or CPU-only** (GPU auto-detected), and works fully offline
+with a local/network Ollama LLM.
 
-## Quickstart
+## Directory structure
+
+The codebase is split into two purpose-named packages that mirror the pipeline —
+**perception** (turn a video into structured observations) and **retrieval**
+(index, search, and answer over them):
+
+```
+VSS/
+├── perception/                 # Layer A: turn video → structured observations
+│   ├── config.py               #   central settings + GPU/VRAM detection (shared)
+│   ├── models.py               #   shared Pydantic schemas (shared)
+│   ├── ingestion/              #   video probe + scene-change keyframe extraction
+│   │   ├── video_loader.py     #     FFmpeg probe, limits, RTSP support
+│   │   └── frame_extractor.py  #     dual-threshold scene detection + time fallback
+│   └── inference/              #   the vision models (the GPU-heavy work)
+│       ├── detector.py         #     YOLOv8 object detection
+│       ├── captioner.py        #     Qwen2.5-VL / BLIP / Ollama structured captions
+│       ├── embedder.py         #     CLIP image/text embeddings
+│       ├── ocr.py              #     PaddleOCR / Ollama text + plate reading
+│       └── pose.py             #     YOLO-pose + fall/fight/running rule engine
+│
+├── retrieval/                  # Layer B: index, search, answer
+│   ├── rag/                    #   retrieval-augmented generation (no LangChain)
+│   │   ├── vector_store.py     #     ChromaDB wrapper + video registry
+│   │   ├── retriever.py        #     hybrid CLIP + BM25 + cross-similarity re-rank
+│   │   └── summariser.py       #     windowed map-reduce streaming summariser + LLM
+│   ├── api/                    #   the FastAPI application
+│   │   └── main.py             #     endpoints + background ingestion pipeline (SSE)
+│   └── ui/                     #   legacy single-file Gradio UI (kept for reference)
+│
+├── frontend/                   # Next.js UI (App Router + Tailwind), talks to the API
+├── tests/                      # unit tests (scene detection, parsing, pose rules, …)
+├── data/                       # RUNTIME volume — uploads, thumbs, chroma (not in image)
+├── model-cache/                # RUNTIME volume — HuggingFace / torch / YOLO weights
+├── Dockerfile                  # single image: perception + retrieval
+├── docker-compose.yml          # api (+ web) services, bind-mounted data & weights
+├── build.sh                    # prerequisite checks + build/run helper
+└── requirements.txt
+```
+
+Dependencies flow one way — `retrieval` imports from `perception`, never the
+reverse — so `config.py`/`models.py` live in `perception` as the shared foundation.
+
+## Prerequisites
+
+- **Docker** — https://docs.docker.com/get-docker/
+- **Docker Compose** — v2 (`docker compose`) or v1 (`docker-compose`)
+- **For GPU (optional):** NVIDIA drivers **and** the
+  [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+  Without a GPU the stack runs CPU-only automatically — no config change needed.
+
+## How to run
 
 ```bash
-docker compose up
+./build.sh                 # or: docker-compose up --build
 ```
 
-Then open **http://localhost:3000** (Next.js UI) — the API lives at
-http://localhost:8000 (interactive docs at `/docs`).
-
-Optional: `cp .env.example .env` and set `ANTHROPIC_API_KEY` for higher-quality Q&A and
-summaries. Without a key, Mini-VSS talks to a local [Ollama](https://ollama.com) server
-(`ollama pull llama3.2` + default endpoint) — no paid APIs required.
-
-**Cold start:** the first run downloads model weights (YOLOv8n ~6 MB, CLIP ViT-B/32
-~350 MB, BLIP base ~1 GB — or BLIP-2 ~4 GB in 4-bit if you have ≥8 GB VRAM). On a
-16 GB-RAM CPU-only machine with a decent connection, expect **10–20 minutes** for the
-first `docker compose up` (image build + weight downloads). Weights are cached in a
-named Docker volume (`model-cache`), so every subsequent start takes seconds.
-
-## Manual dev setup
+`build.sh` checks your prerequisites, builds the image, and starts the stack.
+Add `--no-cache` for a clean rebuild:
 
 ```bash
-# Prereqs: Python 3.11, ffmpeg on PATH
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Terminal 1: API
-uvicorn src.api.main:app --port 8000
-
-# Terminal 2: UI (Next.js dev server on http://localhost:3000)
-cd frontend
-npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
-
-# Tests (fast, no model downloads)
-pytest tests/ -q
-# Include the slow CLIP integration test:
-pytest tests/ -q -m slow
+./build.sh --no-cache
 ```
 
-Each CV/inference module is also runnable standalone for debugging:
+**Enabling a GPU:** uncomment the `deploy:` block in
+[docker-compose.yml](docker-compose.yml) (it's commented so CPU-only hosts don't
+fail on startup), then run the build again.
+
+## Accessing the API & where data lives
+
+| Service | URL |
+|---|---|
+| **API** (FastAPI) | http://localhost:8000 — interactive docs at `/docs` |
+| **UI** (Next.js) | http://localhost:3000 |
+
+Upload a video via the UI, or directly against the API:
 
 ```bash
-python -m src.ingestion.frame_extractor demo.mp4 --out sheet.png   # tune thresholds visually
-python -m src.inference.detector photo.jpg
-python -m src.inference.captioner photo.jpg
-python -m src.inference.embedder photo.jpg
+curl -F "file=@clip.mp4" http://localhost:8000/ingest      # → {job_id, video_id}
+curl http://localhost:8000/status/<job_id>                 # ingestion progress
 ```
 
-## Architecture
+All runtime data is **bind-mounted to the host** (survives rebuilds):
 
+| Host path | Container path | Contents |
+|---|---|---|
+| `./data/uploads` | `/app/data/uploads` | uploaded source videos |
+| `./data/thumbs` | `/app/data/thumbs` | keyframe thumbnails |
+| `./data/chroma` | `/app/data/chroma` | ChromaDB vector store + video registry |
+
+### API reference
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/ingest` | Multipart video upload → `{job_id, video_id}` |
+| `GET` | `/status/{job_id}` | Ingestion job state + progress % |
+| `POST` | `/query` | `{video_id, question}` → SSE-streamed grounded answer |
+| `GET` | `/summary/{video_id}` | SSE-streamed chunked summary |
+| `GET` | `/clip/{video_id}?q=` | Best-matching moment: timestamp + thumbnail |
+| `GET` | `/frames/{video_id}` | All keyframes with timestamps + thumbnails |
+| `GET` | `/videos` | Registry of processed videos |
+| `DELETE` | `/videos/{video_id}` | Remove a video from the store |
+| `GET` | `/health` | Liveness probe |
+
+## Model weights & caching
+
+Weights load from the bind-mounted `./model-cache` directory, so they persist on
+the host and are **never re-downloaded** on rebuild. The image points the caches
+there via env vars:
+
+- `HF_HOME=/app/model-cache/huggingface`
+- `TRANSFORMERS_CACHE=/app/model-cache/huggingface`
+- `TORCH_HOME=/app/model-cache/torch`
+- `YOLO_CONFIG_DIR=/app/model-cache/ultralytics`
+
+**First run** downloads the models you enable (YOLO, the caption VLM, CLIP, …)
+into `./model-cache` — this can take a while. Every subsequent start reuses them.
+
+**Pre-populating the cache** (skip the first-run download): drop an existing
+HuggingFace cache into place before building, e.g.
+
+```bash
+mkdir -p model-cache/huggingface
+# copy a warmed cache from another machine / your host:
+cp -r ~/.cache/huggingface/hub  model-cache/huggingface/hub
 ```
-                ┌────────────────────────────────────────────────────────────┐
-                │                 Layer 5: UI  (Next.js)                     │
-                │        Upload tab · Ask tab (chat) · Summary tab            │
-                └───────────────┬────────────────────────────────────────────┘
-                                │ HTTP / SSE
-                ┌───────────────▼────────────────────────────────────────────┐
-                │                Layer 4: API  (FastAPI)                      │
-                │  POST /ingest   GET /status/{job}   POST /query (stream)    │
-                │  GET /summary/{vid} (stream)   GET /clip   GET /frames      │
-                │        async background jobs + thread-pool inference        │
-                └──────┬──────────────────────────────┬──────────────────────┘
-                       │ ingest pipeline              │ query path
-        ┌──────────────▼──────────────┐  ┌────────────▼───────────────────────┐
-        │ Layer 1: VideoIngestion     │  │ Layer 3: RAGPipeline               │
-        │  video_loader (FFmpeg probe)│  │  vector_store (ChromaDB, local)    │
-        │  frame_extractor            │  │  retriever (CLIP + BM25 + re-rank) │
-        │   · dual-threshold scene    │  │  summariser (30s windows,          │
-        │     detection (diff ∧ χ²)   │  │   recursive reduce, streaming)     │
-        │   · min_scene_gap_sec       │  │        │                           │
-        └──────────────┬──────────────┘  │        ▼                           │
-                       │ keyframes       │  LLM: Anthropic claude-haiku-4-5   │
-        ┌──────────────▼──────────────┐  │       └─fallback→ local Ollama     │
-        │ Layer 2: InferencePipeline  │  └────────────────────────────────────┘
-        │  detector  (YOLOv8n, batch=8)                 ▲
-        │  captioner (Qwen2.5-VL-3B ─fallback→ BLIP)   │
-        │  embedder  (CLIP ViT-L/16, unit-norm 768-d)───┘
-        └─────────────────────────────┘
-```
 
-**Ingest flow:** upload → FFmpeg probe → scene-change keyframes → YOLO detection →
-VLM captions (deduped) → CLIP embeddings → ChromaDB, with 0–100 % progress events.
-
-**Query flow:** question → hybrid retrieval (CLIP text→image similarity ⊕ BM25 over
-captions, top-10 re-ranked by query↔caption similarity) → grounded LLM answer streamed
-token-by-token with timestamp citations and supporting thumbnails.
+Any weights already present under `model-cache/huggingface` are used as-is; only
+missing ones are fetched.
 
 ## Environment variables
 
-All variables are optional — defaults run out of the box. See `.env.example`.
+All are optional — defaults run out of the box. Set them in `.env` (see the
+committed `.env` for the full list). The Docker image also sets the cache/path
+vars inline (above).
 
 | Name | Default | Description |
 |---|---|---|
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ANTHROPIC_API_KEY` | *(empty)* | If set, use Anthropic for Q&A/summaries; else Ollama |
 | `ANTHROPIC_MODEL` | `claude-haiku-4-5-20251001` | Anthropic model id |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local LLM fallback endpoint |
-| `OLLAMA_MODEL` | `llama3.2` | Ollama model name |
-| `MAX_VIDEO_SECONDS` | `500` | Upload duration limit |
-| `MAX_VIDEO_MB` | `300` | Upload size limit |
-| `DIFF_THRESHOLD` | `0.12` | Scene cut: min mean abs pixel diff (0–1) |
-| `HIST_THRESHOLD` | `0.35` | Scene cut: min χ² colour-histogram distance |
-| `MIN_SCENE_GAP_SEC` | `1.5` | Cool-down between keyframes (anti burst-sampling) |
-| `ANALYSIS_FPS` | `6.0` | Decode rate used for cut detection |
-| `MAX_KEYFRAMES` | `120` | Hard cap on keyframes per video |
-| `DETECTOR_MODEL` | `yolov8n.pt` | Ultralytics checkpoint |
-| `DETECTOR_CONFIDENCE` | `0.35` | Detection confidence threshold |
-| `DETECTOR_BATCH_SIZE` | `8` | Frames per YOLO batch |
-| `DETECTOR_CLASSES` | *(empty = all 80)* | Comma-separated COCO class filter |
-| `VRAM_THRESHOLD_GB` | `8` | Below this VRAM, BLIP-2 → BLIP base fallback |
-| `CAPTION_DEDUP_THRESHOLD` | `0.92` | Cosine sim above which consecutive captions merge |
-| `RETRIEVAL_TOP_K` | `5` | Frames returned per query |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | LLM (Q&A/summary) endpoint |
+| `OLLAMA_MODEL` | `llama3.2` | Ollama text model |
+| `MAX_VIDEO_SECONDS` / `MAX_VIDEO_MB` | `500` / `300` | Upload limits |
+| `DIFF_THRESHOLD` / `HIST_THRESHOLD` | `0.08` / `0.15` | Scene-cut thresholds (diff ∧ χ²) |
+| `MIN_SCENE_GAP_SEC` | `1.0` | Cool-down between keyframes |
+| `MAX_GAP_SEC` | `3.0` | Force a keyframe every N s even with no cut |
+| `ANALYSIS_FPS` / `MAX_KEYFRAMES` | `6.0` / `120` | Decode rate / hard keyframe cap |
+| `DETECTOR_MODEL` / `DETECTOR_CONFIDENCE` | `yolov8n.pt` / `0.35` | Object detector |
+| `CAPTION_BACKEND` | `qwen` | `qwen` \| `blip` \| `auto` \| `ollama` |
+| `QWEN_VL_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | Local VLM checkpoint |
+| `CAPTION_MAX_NEW_TOKENS` | `256` | Max tokens per caption (JSON needs headroom) |
+| `OLLAMA_CONCURRENCY` | `4` | Concurrent requests for the Ollama caption/OCR path |
+| `OCR_BACKEND` | `none` | `none` \| `paddle` \| `ollama` |
+| `POSE_ENABLED` | `false` | Enable YOLO-pose fall/fight/running events |
+| `RETRIEVAL_TOP_K` | `10` | Frames returned per query |
 | `SUMMARY_WINDOW_SEC` | `30` | Summarisation window size |
-| `LLM_MAX_TOKENS` | `1024` | Max tokens per LLM call |
-| `DATA_DIR` | `data` | Uploads / thumbnails / registry |
-| `CHROMA_DIR` | `data/chroma` | ChromaDB persistence directory |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Where the browser UI finds the API (build-time) |
-| `API_PORT` | `8000` | API service port (UI serves on `3000`) |
+| `DATA_DIR` / `CHROMA_DIR` | `data` / `data/chroma` | Runtime storage (mounted) |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | Where the browser UI finds the API |
+
+## Tests
+
+```bash
+# inside the container (has all deps):
+docker-compose exec api python -m pytest tests/ -q
+```
 
 ## What this showcases
 
-- **Dual-threshold scene-change detection** (image processing): a cut is declared only
-  when *both* the absolute frame diff and the χ² colour-histogram distance exceed their
-  thresholds — the diff catches structural change, the histogram vetoes motion-only
-  false positives, and a `min_scene_gap_sec` cool-down prevents burst-sampling fast
-  cuts. Includes a contact-sheet visualiser for threshold tuning
-  (`python -m src.ingestion.frame_extractor video.mp4`). See the rationale docstring in
-  [`src/ingestion/frame_extractor.py`](src/ingestion/frame_extractor.py).
-- **Inference pipeline design**: batched YOLO inference (groups of 8),
-  Qwen2.5-VL-3B captioning (captions + actions + OCR in one prompt, 4-bit on GPU,
-  float32 on CPU) with a BLIP fallback if it can't load, CLIP embeddings
-  normalised to the unit sphere, consecutive-caption deduplication (cosine > 0.92),
-  lazy model loading, and per-batch error isolation (a failing frame never kills a job).
-- **Hybrid RAG, implemented directly** (no LangChain/LlamaIndex): CLIP text→image
-  vector similarity fused with BM25 over captions + detection labels, then top-10
-  candidates re-ranked by query↔caption cross-similarity.
-- **Streaming LLM integration**: token-by-token SSE from Anthropic
-  (`claude-haiku-4-5-20251001`) with a zero-config offline Ollama fallback; chunked
-  map-reduce summarisation (30 s windows, recursive reduce past 10 windows).
-- **Async background processing with real-time progress**: FastAPI background jobs run
-  CPU-bound inference in a thread pool, publishing 0–100 % progress that the UI polls
-  every second.
-
-## API reference
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/ingest` | Multipart video upload → `{job_id, video_id}` |
-| `GET` | `/status/{job_id}` | Job state + progress % |
-| `POST` | `/query` | `{video_id, question}` → SSE-streamed grounded answer |
-| `GET` | `/summary/{video_id}` | SSE-streamed chunked summary |
-| `GET` | `/clip/{video_id}?q=...` | Best-matching moment: timestamp + thumbnail |
-| `GET` | `/frames/{video_id}` | All keyframes with timestamps + thumbnails |
-| `GET` | `/videos` | Registry of processed videos |
-
-## Repo layout
-
-```
-├── docker-compose.yml        # api + web services, model-cache volume
-├── Dockerfile                # API image (Python)
-├── .env.example
-├── requirements.txt
-├── src/
-│   ├── config.py             # pydantic-settings + GPU/VRAM detection
-│   ├── models.py             # shared Pydantic schemas
-│   ├── ingestion/            # Layer 1: probe + scene-change keyframes
-│   ├── inference/            # Layer 2: YOLO, BLIP(-2), CLIP
-│   ├── rag/                  # Layer 3: ChromaDB, hybrid retrieval, summariser
-│   ├── api/                  # Layer 4: FastAPI
-│   └── ui/                   # Layer 5: legacy Gradio UI (kept for reference)
-├── frontend/                 # Layer 5: Next.js UI (App Router + Tailwind)
-│   ├── app/                  # layout, page, global styles
-│   ├── components/           # Upload / Ask / Summary tabs, Gallery
-│   ├── lib/                  # API client + SSE stream parsing
-│   └── Dockerfile            # multi-stage Node build (standalone output)
-└── tests/                    # scene detection, normalisation, hybrid retrieval
-```
-
-## Constraints honoured
-
-- No Kubernetes, no cloud dependencies; `ANTHROPIC_API_KEY` optional (Ollama works offline).
-- Cold-starts on 16 GB RAM, CPU-only (BLIP-base path); GPU used automatically when present.
-- RAG implemented from first principles — no LangChain, no LlamaIndex.
-- Python backend; Next.js frontend (App Router + Tailwind) talking to the API over REST + SSE.
+- **Dual-threshold scene-change detection** (diff ∧ χ² histogram) with a
+  time-based fallback for static-camera activity.
+- **Structured VLM captioning** — one JSON schema per frame (scene / people /
+  interactions / objects / vehicles / OCR / events), robust to truncated output.
+- **Dedicated OCR** and **pose-based action rules** (fall / fight / running),
+  independent of the VLM.
+- **Hybrid RAG from first principles** — CLIP + BM25 fusion with cross-similarity
+  re-rank; no LangChain / LlamaIndex.
+- **Streaming LLM** Q&A + map-reduce summarisation over SSE.

@@ -72,8 +72,10 @@ export default function Home() {
       </nav>
 
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/30 p-6">
-        {tab === "upload" && <UploadTab onIngested={handleIngested} />}
-        {tab === "ask" && (
+        <div className={tab === "upload" ? "block" : "hidden"}>
+          <UploadTab onIngested={handleIngested} />
+        </div>
+        <div className={tab === "ask" ? "block" : "hidden"}>
           <AskTab
             videos={videos}
             selected={selected}
@@ -81,8 +83,8 @@ export default function Home() {
             onRefresh={refresh}
             onDelete={handleDelete}
           />
-        )}
-        {tab === "summary" && (
+        </div>
+        <div className={tab === "summary" ? "block" : "hidden"}>
           <SummaryTab
             videos={videos}
             selected={selected}
@@ -90,7 +92,7 @@ export default function Home() {
             onRefresh={refresh}
             onDelete={handleDelete}
           />
-        )}
+        </div>
       </section>
 
       <footer className="mt-8 text-center text-xs text-neutral-600">

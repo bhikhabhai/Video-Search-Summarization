@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from src.config import get_device, get_settings
+from perception.config import get_device, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ class Embedder:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Embed an image and a few probe texts")

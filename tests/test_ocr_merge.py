@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from src.api.main import _merge_ocr
-from src.inference.ocr import _dedupe
+from retrieval.api.main import _merge_ocr
+from perception.inference.ocr import _dedupe
 
 
 class TestDedupe:

@@ -2,7 +2,7 @@
 
 The loader is deliberately thin: it validates that the source is decodable,
 extracts duration / fps / resolution, and enforces the upload limits from
-config. Frame decoding lives in :mod:`src.ingestion.frame_extractor`.
+config. Frame decoding lives in :mod:`perception.ingestion.frame_extractor`.
 """
 
 from __future__ import annotations
@@ -14,8 +14,8 @@ from pathlib import Path
 
 import ffmpeg
 
-from src.config import get_settings
-from src.models import VideoMeta
+from perception.config import get_settings
+from perception.models import VideoMeta
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ if __name__ == "__main__":
     import argparse
     import sys
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Probe a video file or RTSP URL")

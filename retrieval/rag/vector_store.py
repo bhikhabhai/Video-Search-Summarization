@@ -22,8 +22,8 @@ from pathlib import Path
 import chromadb
 import numpy as np
 
-from src.config import get_settings
-from src.models import FrameRecord, RetrievedFrame, VideoSummaryInfo
+from perception.config import get_settings
+from perception.models import FrameRecord, RetrievedFrame, VideoSummaryInfo
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ class VectorStore:
 
 
 if __name__ == "__main__":
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     store = VectorStore()

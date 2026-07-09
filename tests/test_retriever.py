@@ -10,9 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.inference.embedder import l2_normalise
-from src.models import RetrievedFrame
-from src.rag.retriever import HybridRetriever
+from perception.inference.embedder import l2_normalise
+from perception.models import RetrievedFrame
+from retrieval.rag.retriever import HybridRetriever
 
 VIDEO_ID = "vid001"
 

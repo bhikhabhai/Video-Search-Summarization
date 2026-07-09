@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from src.inference.pose import (
+from perception.inference.pose import (
     L_ANKLE,
     L_HIP,
     L_SHOULDER,

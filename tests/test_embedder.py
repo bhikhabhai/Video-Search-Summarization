@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.inference.embedder import EMBED_DIM, l2_normalise
+from perception.inference.embedder import EMBED_DIM, l2_normalise
 
 
 class TestL2Normalise:
@@ -57,7 +57,7 @@ class TestEmbedderIntegration:
         pytest.importorskip("torch")
         from PIL import Image
 
-        from src.inference.embedder import Embedder
+        from perception.inference.embedder import Embedder
 
         embedder = Embedder()
         image = Image.new("RGB", (224, 224), (200, 30, 30))

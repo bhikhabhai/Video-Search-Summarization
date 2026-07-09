@@ -1,49 +1,50 @@
 services:
   api:
     build: .
-    command: >
-      sh -c "mkdir -p /root/.cache/ultralytics/Ultralytics &&
-             exec uvicorn src.api.main:app --host 0.0.0.0 --port 8000"
+    image: mini-vss
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
-      - OLLAMA_CAPTION_BASE_URL=${OLLAMA_CAPTION_BASE_URL:-}
-      - CAPTION_OLLAMA_MODEL=${CAPTION_OLLAMA_MODEL:-qwen2.5vl}
+      # Both packages importable as top-level (perception/, retrieval/).
+      - PYTHONPATH=/app
+      # HuggingFace models load from the mounted cache — no re-downloads.
+      - HF_HOME=/app/model-cache/huggingface
+      - TRANSFORMERS_CACHE=/app/model-cache/huggingface
+      - TORCH_HOME=/app/model-cache/torch
+      - YOLO_CONFIG_DIR=/app/model-cache/ultralytics
       - DATA_DIR=/app/data
       - CHROMA_DIR=/app/data/chroma
     volumes:
-      - ./model-cache:/root/.cache  # HF / torch / YOLO / CLIP weights survive restarts
-      - ./data:/app/data            # uploads, thumbnails, ChromaDB
+      # Bind mounts: data + weights persist on the HOST, never lost on rebuild.
+      - ./data:/app/data                 # uploads, thumbs, chroma
+      - ./model-cache:/app/model-cache   # HuggingFace / torch / YOLO weights
     extra_hosts:
       - "host.docker.internal:host-gateway"  # reach a host-side Ollama on Linux
-    # ── GPU (optional) ────────────────────────────────────────
-    # Uncomment to pass an NVIDIA GPU through (requires the NVIDIA
-    # Container Toolkit). The app auto-detects CUDA at startup and
-    # falls back to CPU when absent — no config change needed.
+    # ── GPU passthrough (optional) ──────────────────────────────
+    # Requires NVIDIA drivers + the NVIDIA Container Toolkit on the host. The
+    # app auto-detects CUDA and falls back to CPU when absent, so this stays
+    # COMMENTED by default — otherwise `docker-compose up` fails on CPU-only
+    # hosts with "could not select device driver". Uncomment on a GPU box:
+    #
     # deploy:
     #   resources:
     #     reservations:
     #       devices:
     #         - driver: nvidia
-    #           count: 1
+    #           count: all
     #           capabilities: [gpu]
 
+  # Next.js UI (unchanged). Talks to the API from the browser on :8000.
   web:
     build:
       context: ./frontend
       args:
-        # Baked into the client bundle at build time. The browser calls the
-        # API on the host-published port, so this is localhost, not "api".
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+    environment:
+      - INTERNAL_API_URL=http://api:8000
     ports:
       - "3000:3000"
     depends_on:
       - api
-
-# Named volumes removed — all data is now bind-mounted to the host
-# so you can inspect / wipe it directly without going through Docker.

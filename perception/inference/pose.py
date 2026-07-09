@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from src.config import get_settings
+from perception.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +183,7 @@ class PoseEstimator:
             return
         from ultralytics import YOLO
 
-        from src.config import get_device
+        from perception.config import get_device
 
         logger.info("Loading YOLO-pose (%s)", self.model_name)
         self._model = YOLO(self.model_name)
@@ -238,7 +238,7 @@ class PoseEstimator:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Detect pose-based events in an image")

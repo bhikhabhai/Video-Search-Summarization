@@ -21,8 +21,8 @@ from collections.abc import Iterator
 
 import httpx
 
-from src.config import get_settings
-from src.models import RetrievedFrame
+from perception.config import get_settings
+from perception.models import RetrievedFrame
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +212,8 @@ class Summariser:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
-    from src.rag.vector_store import VectorStore
+    from perception.config import configure_logging
+    from retrieval.rag.vector_store import VectorStore
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Stream a summary for a processed video")

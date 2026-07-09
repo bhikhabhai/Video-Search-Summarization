@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from src.config import get_settings
+from perception.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ class OCRReader:
         )
         self.ollama_url = url.rstrip("/")
         self.ollama_model = settings.ocr_ollama_model
+        self._concurrency = max(1, settings.ollama_concurrency)
         self._paddle: Any = None
 
     @property
@@ -94,10 +95,24 @@ class OCRReader:
             return []
 
     def read_batch(self, images: list[Image.Image]) -> list[list[str]]:
-        """OCR every frame; returns one list of strings per input image."""
+        """OCR every frame; returns one list of strings per input image.
+
+        The Ollama backend is network-bound, so its requests run concurrently;
+        local PaddleOCR runs sequentially (it already uses the CPU fully).
+        """
         if not self.enabled:
             return [[] for _ in images]
-        return [self.read(img) for img in images]
+        total = len(images)
+        if self.backend == "ollama" and self._concurrency > 1 and total > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
+                return list(pool.map(self.read, images))
+        results: list[list[str]] = []
+        for i, img in enumerate(images):
+            logger.info("OCR frame %d/%d (%d remaining)", i + 1, total, total - i - 1)
+            results.append(self.read(img))
+        return results
 
     # ── Backends ───────────────────────────────────────────────
 
@@ -156,7 +171,7 @@ def _dedupe(items: list[str]) -> list[str]:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Run OCR on an image with the configured backend")

@@ -2,7 +2,15 @@
 __pycache__/
 *.pyc
 .git/
-data/
-.env
 .pytest_cache/
 TODO.md
+
+# Runtime volumes — bind-mounted at run time, never baked into the image.
+data/
+model-cache/
+.env
+
+# The Next.js UI builds from its own context (frontend/Dockerfile); keep its
+# heavy artifacts out of the backend build context.
+frontend/node_modules/
+frontend/.next/

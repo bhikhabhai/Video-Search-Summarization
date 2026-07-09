@@ -17,8 +17,8 @@ from typing import Any
 
 from PIL import Image
 
-from src.config import get_device, get_settings
-from src.models import Detection
+from perception.config import get_device, get_settings
+from perception.models import Detection
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class Detector:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Run YOLOv8n on a single image")

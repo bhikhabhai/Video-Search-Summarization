@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from src.ingestion.frame_extractor import FrameExtractor, frame_metrics, _colour_hist, _gray_proxy
+from perception.ingestion.frame_extractor import FrameExtractor, frame_metrics, _colour_hist, _gray_proxy
 
 WIDTH, HEIGHT = 320, 180
 FPS = 6.0

@@ -28,7 +28,14 @@
       "Bash(docker cp *)",
       "Bash(python3 -m compileall -q src/inference/ocr.py src/api/main.py src/config.py)",
       "Bash(python3 -m compileall -q src)",
-      "Bash(python3 -m compileall -q src/inference/pose.py src/api/main.py src/config.py)"
+      "Bash(python3 -m compileall -q src/inference/pose.py src/api/main.py src/config.py)",
+      "Bash(python3 -m compileall -q src/inference/captioner.py src/inference/ocr.py src/config.py)",
+      "Bash(python3 -m compileall -q src/inference/captioner.py src/inference/ocr.py)",
+      "Bash(chmod +x build.sh)",
+      "Bash(bash -n build.sh)",
+      "Bash(python3 -m compileall -q perception retrieval)",
+      "Bash(python3 -m compileall -q perception/inference/captioner.py perception/config.py)",
+      "Bash(python3 -m compileall -q tests/test_caption_batching.py)"
     ]
   }
 }

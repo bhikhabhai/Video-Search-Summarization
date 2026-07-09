@@ -27,10 +27,10 @@ import re
 import numpy as np
 from rank_bm25 import BM25Okapi
 
-from src.config import get_settings
-from src.inference.embedder import Embedder
-from src.models import RetrievedFrame
-from src.rag.vector_store import VectorStore
+from perception.config import get_settings
+from perception.inference.embedder import Embedder
+from perception.models import RetrievedFrame
+from retrieval.rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -168,7 +168,7 @@ class HybridRetriever:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Hybrid search over a processed video")

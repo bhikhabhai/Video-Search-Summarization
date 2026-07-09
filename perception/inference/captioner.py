@@ -27,14 +27,14 @@ import io
 import json
 import logging
 from collections import Counter
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image
 
-from src.config import get_device, get_settings, get_vram_gb
-from src.inference.embedder import Embedder
-from src.models import Detection
+from perception.config import get_device, get_settings, get_vram_gb
+from perception.inference.embedder import Embedder
+from perception.models import Detection
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +73,32 @@ _STRUCTURED_INSTRUCTION = (
 # ── Structured-JSON parsing (VLM-agnostic, unit-testable) ──────
 
 
+def _flatten_item(item: Any) -> str:
+    """Render one list item as a readable phrase.
+
+    Strings pass through; dicts (e.g. a VLM returning ``{"type": "car",
+    "color": "gray"}`` inside ``objects``) become ``"gray car"`` rather than a
+    raw ``{...}`` repr. A ``plate`` field is appended when present.
+    """
+    if isinstance(item, dict):
+        color = str(item.get("color", "")).strip()
+        typ = str(item.get("type", "")).strip()
+        name = str(item.get("name", "")).strip()
+        base = (f"{color} {typ}".strip() or name
+                or " ".join(str(v).strip() for v in item.values() if str(v).strip()))
+        plate = str(item.get("plate", "")).strip()
+        if plate:
+            base = f"{base} (plate {plate})".strip()
+        return base.strip()
+    return str(item).strip()
+
+
 def _as_str_list(value: Any) -> list[str]:
     """Coerce an arbitrary JSON value into a clean list of non-empty strings."""
     if value is None:
         return []
     if isinstance(value, list):
-        return [str(x).strip() for x in value if str(x).strip()]
+        return [s for s in (_flatten_item(x) for x in value) if s]
     text = str(value).strip()
     return [text] if text else []
 
@@ -176,7 +196,8 @@ def normalize_structured(data: dict) -> dict:
     """
     scene = data.get("scene", "")
     if isinstance(scene, dict):
-        scene = ", ".join(f"{k}: {v}" for k, v in scene.items())
+        # Join the values only ("indoor, natural"), not the keys.
+        scene = ", ".join(str(v).strip() for v in scene.values() if str(v).strip())
     scene = str(scene).strip()
 
     activities: list[str] = []
@@ -213,6 +234,11 @@ def normalize_structured(data: dict) -> dict:
                     vehicle_strs.append(desc)
             elif str(veh).strip():
                 vehicle_strs.append(str(veh).strip())
+
+    # Drop objects already covered by the vehicles list (VLMs often duplicate
+    # vehicles into both), so the caption doesn't say them twice.
+    veh_lower = {v.lower() for v in vehicle_strs}
+    objects = [o for o in objects if o.lower() not in veh_lower]
 
     ocr_text = "; ".join(text_items + plates)
     actions = activities + interactions
@@ -251,6 +277,8 @@ class Captioner:
         caption_url = settings.ollama_caption_base_url or settings.ollama_base_url
         self.ollama_caption_url = caption_url.rstrip("/")
         self.ollama_caption_model = settings.ollama_caption_model
+        self._concurrency = max(1, settings.ollama_concurrency)
+        self._batch_size = max(1, settings.caption_batch_size)
         # Shared with the pipeline's embedder so CLIP loads only once.
         self._embedder = embedder or Embedder()
         self._model: Any = None
@@ -324,15 +352,22 @@ class Captioner:
             load_kwargs["device_map"] = "auto"
             self._device = "cuda"
         elif device == "cuda":
-            load_kwargs["torch_dtype"] = torch.float16
+            load_kwargs["dtype"] = torch.float16
             self._device = "cuda"
         else:
-            load_kwargs["torch_dtype"] = torch.float32
+            load_kwargs["dtype"] = torch.float32
             self._device = "cpu"
             logger.warning(
                 "Qwen2.5-VL on CPU is slow (~15-30 s/frame). Consider a GPU, a "
                 "smaller MAX_KEYFRAMES, or CAPTION_BACKEND=blip for faster ingest."
             )
+
+        # Left-padding is required for correct *batched* decoder generation:
+        # padded rows share one length, so trimming the prompt is uniform and
+        # generated tokens are appended after the real prompt (not after pad).
+        tokenizer = getattr(self._processor, "tokenizer", None)
+        if tokenizer is not None:
+            tokenizer.padding_side = "left"
 
         self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.qwen_name, **load_kwargs
@@ -419,6 +454,53 @@ class Captioner:
             trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )[0]
         return " ".join(text_out.split()).strip()
+
+    def _qwen_generate_batch(
+        self, images: list[Image.Image], prompts: list[str]
+    ) -> list[str]:
+        """Generate for a batch of (image, prompt) pairs in one forward pass.
+
+        With left-padding (set at load time) all rows share the padded prompt
+        length, so ``generated[:, prompt_len:]`` isolates each row's new tokens.
+        """
+        import torch
+        from qwen_vl_utils import process_vision_info
+
+        conversations = [
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": img.convert("RGB")},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+            for img, prompt in zip(images, prompts)
+        ]
+        texts = [
+            self._processor.apply_chat_template(c, tokenize=False, add_generation_prompt=True)
+            for c in conversations
+        ]
+        image_inputs, video_inputs = process_vision_info(conversations)
+        inputs = self._processor(
+            text=texts,
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(self._device)
+
+        with torch.no_grad():
+            generated = self._model.generate(
+                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False
+            )
+        prompt_len = inputs.input_ids.shape[1]
+        trimmed = generated[:, prompt_len:]
+        decoded = self._processor.batch_decode(
+            trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        return [" ".join(t.split()).strip() for t in decoded]
 
     def _ollama_generate(self, image: Image.Image, prompt: str, force_json: bool = False) -> str:
         """Run one caption against the remote Ollama vision model."""
@@ -519,31 +601,120 @@ class Captioner:
             return _empty_description(raw)
         return normalize_structured(data)
 
+    def _safe_describe_one(self, image: Image.Image, hint: str) -> dict:
+        try:
+            return self._describe_one(image, hint)
+        except Exception:
+            logger.exception("Description failed on a frame; using empty")
+            return _empty_description()
+
+    @staticmethod
+    def _fields_from_raw(raw: str) -> dict:
+        """Parse one raw VLM JSON string into structured fields (or raw caption)."""
+        data = extract_json(raw)
+        if not data:
+            logger.warning("Structured caption JSON parse failed; using raw text")
+            return _empty_description(raw)
+        return normalize_structured(data)
+
+    def _describe_qwen_batched(
+        self,
+        images: list[Image.Image],
+        hints: list[str],
+        batch_size: int,
+        progress_cb: Callable[[int, int], None] | None = None,
+    ) -> list[dict]:
+        """Describe frames in Qwen batches (one forward pass per group).
+
+        Trades RAM for speed: a bigger batch keeps the CPU/GPU busier per call
+        but raises peak memory. A failed batch falls back to per-frame so one
+        bad group never loses the whole run.
+        """
+        prompts = [
+            _STRUCTURED_INSTRUCTION + (f"\n\nAn object detector reported: {h}." if h else "")
+            for h in hints
+        ]
+        total = len(images)
+        results: list[dict] = []
+        done = 0
+        for start in range(0, total, batch_size):
+            end = min(start + batch_size, total)
+            logger.info("Captioning frames %d-%d/%d (batch of %d)", start + 1, end, total, end - start)
+            try:
+                raws = self._qwen_generate_batch(images[start:end], prompts[start:end])
+                results.extend(self._fields_from_raw(r) for r in raws)
+                done += end - start
+                if progress_cb is not None:
+                    progress_cb(done, total)
+            except Exception:
+                logger.exception("Batch %d-%d failed; retrying that batch per-frame", start + 1, end)
+                for img, hint in zip(images[start:end], hints[start:end]):
+                    results.append(self._safe_describe_one(img, hint))
+                    done += 1
+                    if progress_cb is not None:
+                        progress_cb(done, total)
+        return results
+
     def describe_frames(
         self,
         images: list[Image.Image],
         detections: list[list[Detection]] | None = None,
+        progress_cb: Callable[[int, int], None] | None = None,
     ) -> list[dict]:
         """Structured per-frame descriptions (scene/actions/ocr_text/events + caption).
 
-        Deduplicates near-identical consecutive frames (by caption CLIP cosine),
-        reusing the previous description to avoid embedding-store noise. Per-frame
-        failures yield an empty description rather than aborting the batch.
+        Stage 1 produces one description per frame. For the network (Ollama)
+        backend these run concurrently (they are I/O-bound HTTP calls, so the
+        GIL is released while waiting); local CPU/GPU models run sequentially,
+        since one inference already uses all cores. Stage 2 deduplicates
+        near-identical consecutive frames by caption CLIP cosine, reusing the
+        previous description to avoid embedding-store noise.
         """
         self._load()
+        hints = [
+            self._build_hint(detections[i]) if detections else ""
+            for i in range(len(images))
+        ]
+
+        # ── Stage 1: per-frame description ──────────────────────
+        # - Ollama (network): concurrent HTTP requests.
+        # - Local Qwen with CAPTION_BATCH_SIZE > 1: batched forward passes.
+        # - Otherwise: sequential (one inference already uses all cores).
+        total = len(images)
+        if self._backend == "ollama" and self._concurrency > 1 and total > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            raw: list[dict] = [_empty_description()] * total
+            with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
+                futures = {
+                    pool.submit(self._safe_describe_one, img, h): i
+                    for i, (img, h) in enumerate(zip(images, hints))
+                }
+                done = 0
+                for fut in as_completed(futures):
+                    i = futures[fut]
+                    raw[i] = fut.result()
+                    done += 1
+                    if progress_cb is not None:
+                        progress_cb(done, total)
+                    logger.info("Captioned %d/%d frames (%d-way concurrent)", done, total, self._concurrency)
+        elif self._backend == "qwen" and self._batch_size > 1 and total > 1:
+            raw = self._describe_qwen_batched(
+                images, hints, self._batch_size, progress_cb=progress_cb
+            )
+        else:
+            raw = []
+            for i, (img, h) in enumerate(zip(images, hints)):
+                logger.info("Captioning frame %d/%d (%d remaining)", i + 1, total, total - i - 1)
+                raw.append(self._safe_describe_one(img, h))
+                if progress_cb is not None:
+                    progress_cb(i + 1, total)
+
+        # ── Stage 2: sequential dedup ───────────────────────────
         results: list[dict] = []
         prev: dict | None = None
         prev_vec: np.ndarray | None = None
-
-        for i, image in enumerate(images):
-            hint = self._build_hint(detections[i]) if detections else ""
-            try:
-                fields = self._describe_one(image, hint)
-            except Exception:
-                logger.exception("Description failed on frame %d; using empty", i)
-                results.append(_empty_description())
-                continue
-
+        for fields in raw:
             caption = fields.get("caption", "").strip()
             if caption and prev_vec is not None and prev is not None:
                 try:
@@ -684,7 +855,7 @@ class Captioner:
 if __name__ == "__main__":
     import argparse
 
-    from src.config import configure_logging
+    from perception.config import configure_logging
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Caption a single image with the active VLM")

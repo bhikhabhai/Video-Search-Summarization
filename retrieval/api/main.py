@@ -32,15 +32,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from PIL import Image
 
-from src.config import configure_logging, get_settings
-from src.inference.captioner import Captioner
-from src.inference.detector import Detector
-from src.inference.embedder import Embedder
-from src.inference.ocr import OCRReader
-from src.inference.pose import PoseEstimator
-from src.ingestion.frame_extractor import FrameExtractor
-from src.ingestion.video_loader import VideoLoadError, load_video
-from src.models import (
+from perception.config import configure_logging, get_settings
+from perception.inference.captioner import Captioner
+from perception.inference.detector import Detector
+from perception.inference.embedder import Embedder
+from perception.inference.ocr import OCRReader
+from perception.inference.pose import PoseEstimator
+from perception.ingestion.frame_extractor import FrameExtractor
+from perception.ingestion.video_loader import VideoLoadError, load_video
+from perception.models import (
     ExtractedFrame,
     FrameRecord,
     IngestStatus,
@@ -49,9 +49,9 @@ from src.models import (
     RetrievedFrame,
     VideoSummaryInfo,
 )
-from src.rag.retriever import HybridRetriever
-from src.rag.summariser import LLMClient, Summariser, _format_window
-from src.rag.vector_store import VectorStore
+from retrieval.rag.retriever import HybridRetriever
+from retrieval.rag.summariser import LLMClient, Summariser, _format_window
+from retrieval.rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +176,21 @@ def _run_ingest(job_id: str, video_path: str, filename: str) -> None:
         detections = p.detector.detect_batch(images)
 
         update(55, "describing keyframes (scene/actions/OCR/events, guided by detections)")
-        descriptions = p.captioner.describe_frames(images, detections=detections)
+
+        # Keep /status responsive during long captioning runs (especially CPU Qwen)
+        # by mapping per-frame completion to a 55->74 progress span.
+        def on_caption_progress(done: int, total: int) -> None:
+            if total <= 0:
+                return
+            span = 74 - 55
+            pct = 55 + int((done / total) * span)
+            update(max(status.progress, pct), f"captioning keyframes {done}/{total}")
+
+        descriptions = p.captioner.describe_frames(
+            images,
+            detections=detections,
+            progress_cb=on_caption_progress,
+        )
 
         if p.ocr.enabled:
             update(75, f"reading text/plates ({p.ocr.backend} OCR)")

@@ -18,6 +18,8 @@ export default function UploadTab({
   const [error, setError] = useState("");
   const [frames, setFrames] = useState<Frame[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const cancelRequestedRef = useRef(false);
 
   function pick(f: File | null | undefined) {
     if (!f) return;
@@ -30,6 +32,10 @@ export default function UploadTab({
 
   async function handleUpload() {
     if (!file || busy) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    cancelRequestedRef.current = false;
+
     setBusy(true);
     setError("");
     setFrames([]);
@@ -37,14 +43,22 @@ export default function UploadTab({
     setMessage("Uploading…");
 
     try {
-      const { job_id, video_id } = await ingestVideo(file);
+      const { job_id, video_id } = await ingestVideo(file, controller.signal);
       setMessage("Queued…");
 
       // Poll status once per second until done or error.
       // eslint-disable-next-line no-constant-condition
       while (true) {
+        if (cancelRequestedRef.current) {
+          setMessage("Upload cancelled.");
+          break;
+        }
         await new Promise((r) => setTimeout(r, 1000));
-        const s = await getStatus(job_id);
+        if (cancelRequestedRef.current) {
+          setMessage("Upload cancelled.");
+          break;
+        }
+        const s = await getStatus(job_id, controller.signal);
         setProgress(s.progress);
         setMessage(s.message);
         if (s.state === "error") {
@@ -58,10 +72,25 @@ export default function UploadTab({
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const isAbort = e instanceof DOMException && e.name === "AbortError";
+      if (isAbort && cancelRequestedRef.current) {
+        setError("");
+        setMessage("Upload cancelled.");
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       setBusy(false);
+      abortRef.current = null;
+      cancelRequestedRef.current = false;
     }
+  }
+
+  function handleCancelUpload() {
+    if (!busy) return;
+    cancelRequestedRef.current = true;
+    setMessage("Cancelling upload…");
+    abortRef.current?.abort();
   }
 
   return (
@@ -105,13 +134,22 @@ export default function UploadTab({
         />
       </div>
 
-      <button
-        onClick={handleUpload}
-        disabled={!file || busy}
-        className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        {busy ? "Processing…" : "Ingest video"}
-      </button>
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <button
+          onClick={handleUpload}
+          disabled={!file || busy}
+          className="w-full rounded-lg bg-emerald-600 px-4 py-2.5 font-medium text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy ? "Processing…" : "Ingest video"}
+        </button>
+        <button
+          onClick={handleCancelUpload}
+          disabled={!busy}
+          className="w-full rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2.5 font-medium text-neutral-200 transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Cancel upload
+        </button>
+      </div>
 
       {(busy || progress > 0) && !error && (
         <div className="space-y-1.5">

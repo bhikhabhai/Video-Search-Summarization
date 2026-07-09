@@ -1,11 +1,13 @@
 import { readSSE } from "./sse";
 import { Frame, IngestStatus, VideoInfo } from "./types";
 
-// NEXT_PUBLIC_* is inlined at build time. The browser always reaches the API
-// on the host-published port, so localhost:8000 is the right default even
-// inside Docker Compose.
-export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+function resolveApiUrl(): string {
+  // Use Next.js same-origin proxy to avoid LAN browser -> API direct calls
+  // (CORS/mixed-content/firewall issues) and keep one public origin (:3000).
+  return "/api";
+}
+
+export const API_URL = resolveApiUrl();
 
 // Marker the /query endpoint prepends to the supporting-frames payload.
 const FRAMES_MARKER = "\u0000FRAMES:";
@@ -26,16 +28,27 @@ export async function listVideos(): Promise<VideoInfo[]> {
 
 export async function ingestVideo(
   file: File,
+  signal?: AbortSignal,
 ): Promise<{ job_id: string; video_id: string }> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_URL}/ingest`, { method: "POST", body: form });
+  const res = await fetch(`${API_URL}/ingest`, {
+    method: "POST",
+    body: form,
+    signal,
+  });
   if (!res.ok) throw new Error(await res.text());
   return res.json();
 }
 
-export async function getStatus(jobId: string): Promise<IngestStatus> {
-  const res = await fetch(`${API_URL}/status/${jobId}`, { cache: "no-store" });
+export async function getStatus(
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<IngestStatus> {
+  const res = await fetch(`${API_URL}/status/${jobId}`, {
+    cache: "no-store",
+    signal,
+  });
   if (!res.ok) throw new Error(`status request failed (${res.status})`);
   return res.json();
 }
