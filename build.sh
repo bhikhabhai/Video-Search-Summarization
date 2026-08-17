@@ -4,20 +4,25 @@
 #
 #   ./build.sh              build (using cache) and start the stack
 #   ./build.sh --no-cache   force a clean image rebuild, then start
+#   ./build.sh --restart    restart the API for code changes — no build/reinstall
+#                           (code is bind-mounted; rebuild only when
+#                            requirements.txt changes)
 #
 set -euo pipefail
 
 NO_CACHE=0
+RESTART=0
 for arg in "$@"; do
   case "$arg" in
     --no-cache) NO_CACHE=1 ;;
+    --restart) RESTART=1 ;;
     -h|--help)
-      echo "Usage: ./build.sh [--no-cache]"
+      echo "Usage: ./build.sh [--no-cache | --restart]"
       exit 0
       ;;
     *)
       echo "Unknown argument: $arg" >&2
-      echo "Usage: ./build.sh [--no-cache]" >&2
+      echo "Usage: ./build.sh [--no-cache | --restart]" >&2
       exit 2
       ;;
   esac
@@ -47,14 +52,17 @@ echo "Using: ${COMPOSE}"
 # Normal path: `up --build` recreates changed containers in place — no `down`
 # needed. For a clean rebuild we tear down first so containers are recreated
 # fresh (also sidesteps the ContainerConfig bug in docker-compose v1).
-if [ "${NO_CACHE}" -eq 1 ]; then
+if [ "${RESTART}" -eq 1 ]; then
+  echo "Restarting API for code changes (no build)..."
+  ${COMPOSE} restart api
+elif [ "${NO_CACHE}" -eq 1 ]; then
   echo "Tearing down and rebuilding with --no-cache (clean rebuild)..."
   ${COMPOSE} down
   ${COMPOSE} build --no-cache
-  ${COMPOSE} up -d
+  ${COMPOSE} up 
 else
   echo "Building images (using cache) and starting..."
-  ${COMPOSE} up -d --build
+  ${COMPOSE} up --build
 fi
 
 # ── Success message ───────────────────────────────────────────

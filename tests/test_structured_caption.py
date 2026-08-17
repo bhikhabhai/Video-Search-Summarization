@@ -43,6 +43,15 @@ class TestExtractJson:
         out = extract_json(raw)
         assert out["people"][0]["count"] == 2
 
+    def test_truncated_after_dangling_key(self):
+        # Cut off right after a key with no value (real Qwen failure).
+        raw = ('{"objects": [{"type": "backpack", "color": "orange"}], '
+               '"vehicles": [{"type": "car", "color": "silver"}, '
+               '{"type": "car", "color":')
+        out = extract_json(raw)
+        assert out["objects"][0]["color"] == "orange"
+        assert out["vehicles"][0]["type"] == "car"  # complete vehicle kept
+
     def test_trailing_prose_after_object(self):
         # Balanced object followed by junk should still parse cleanly.
         raw = '{"scene": "street"} Note: this is my best guess.'
@@ -82,7 +91,26 @@ class TestNormalizeStructured:
             "actions": [],
             "ocr_text": "",
             "events": [],
+            "items": [],
         }
+
+    def test_items_carry_vlm_colours(self):
+        out = normalize_structured({
+            "objects": [{"type": "backpack", "color": "orange"}],
+            "vehicles": [{"type": "car", "color": "silver", "plate": "AB12"}],
+        })
+        assert "orange backpack" in out["items"]
+        assert "silver car" in out["items"]        # no plate noise in items
+
+    def test_repeated_vehicles_deduped(self):
+        # VLM re-lists the same cars many times → distinct set only.
+        out = normalize_structured({
+            "vehicles": [{"type": "car", "color": "white"}] * 25
+                        + [{"type": "car", "color": "blue"}] * 5,
+        })
+        assert out["items"] == ["white car", "blue car"]
+        assert out["caption"].count("white car") == 1
+
 
     def test_scene_as_dict_joins_values_only(self):
         out = normalize_structured({"scene": {"location": "street", "lighting": "night"}})

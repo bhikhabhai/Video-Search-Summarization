@@ -11,6 +11,8 @@ export default function UploadTab({
   onIngested: (videoId: string) => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
+  const [metaFile, setMetaFile] = useState<File | null>(null);
+  const [manifestFile, setManifestFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -43,7 +45,9 @@ export default function UploadTab({
     setMessage("Uploading…");
 
     try {
-      const { job_id, video_id } = await ingestVideo(file, controller.signal);
+      const { job_id, video_id } = await ingestVideo(
+        file, metaFile, manifestFile, controller.signal,
+      );
       setMessage("Queued…");
 
       // Poll status once per second until done or error.
@@ -133,6 +137,42 @@ export default function UploadTab({
           onChange={(e) => pick(e.target.files?.[0])}
         />
       </div>
+
+      <label className="flex items-center justify-between gap-3 rounded-lg border border-neutral-800 bg-neutral-900/50 px-3 py-2 text-sm">
+        <span className="text-neutral-400">
+          IVA <span className="font-mono">.meta.jsonl</span>{" "}
+          <span className="text-neutral-600">(optional — uses IVA detections/tracking/plates)</span>
+        </span>
+        <input
+          type="file"
+          accept=".jsonl,.json,application/json"
+          onChange={(e) => setMetaFile(e.target.files?.[0] ?? null)}
+          className="max-w-[45%] text-xs text-neutral-400 file:mr-2 file:rounded file:border-0 file:bg-neutral-800 file:px-2 file:py-1 file:text-neutral-200"
+        />
+      </label>
+      {metaFile && (
+        <p className="text-xs text-emerald-400">
+          IVA mode: {metaFile.name} — detection/tracking from IVA, YOLO skipped.
+        </p>
+      )}
+
+      <label className="flex items-center justify-between gap-3 rounded-lg border border-neutral-800 bg-neutral-900/50 px-3 py-2 text-sm">
+        <span className="text-neutral-400">
+          IVA <span className="font-mono">.manifest.jsonl</span>{" "}
+          <span className="text-neutral-600">(optional — draws tripwire / zone ROIs)</span>
+        </span>
+        <input
+          type="file"
+          accept=".jsonl,.json,application/json"
+          onChange={(e) => setManifestFile(e.target.files?.[0] ?? null)}
+          className="max-w-[45%] text-xs text-neutral-400 file:mr-2 file:rounded file:border-0 file:bg-neutral-800 file:px-2 file:py-1 file:text-neutral-200"
+        />
+      </label>
+      {manifestFile && (
+        <p className="text-xs text-emerald-400">
+          ROI geometry: {manifestFile.name} — tripwire/zones drawn on event frames.
+        </p>
+      )}
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
         <button

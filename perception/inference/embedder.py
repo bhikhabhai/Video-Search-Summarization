@@ -40,6 +40,7 @@ class Embedder:
         settings = get_settings()
         self.model_name = settings.clip_model
         self.pretrained = settings.clip_pretrained
+        self.clip_device_pref = getattr(settings, "clip_device", "auto")
         self._model: Any = None
         self._preprocess: Any = None
         self._tokenizer: Any = None
@@ -50,7 +51,7 @@ class Embedder:
         import open_clip
         import torch
 
-        device = get_device()
+        device = get_device() if self.clip_device_pref == "auto" else self.clip_device_pref
         logger.info("Loading CLIP %s (%s) on %s", self.model_name, self.pretrained, device)
         model, _, preprocess = open_clip.create_model_and_transforms(
             self.model_name, pretrained=self.pretrained

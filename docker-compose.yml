@@ -16,25 +16,32 @@ services:
       - YOLO_CONFIG_DIR=/app/model-cache/ultralytics
       - DATA_DIR=/app/data
       - CHROMA_DIR=/app/data/chroma
+      # Silence ChromaDB's noisy (harmless) telemetry capture() errors.
+      - ANONYMIZED_TELEMETRY=False
+      # GTX 1650 (4 GB) VRAM management — reduce allocator fragmentation so
+      # Qwen + CLIP + YOLO can share 3.62 GB without "unknown error" OOMs.
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+      # Make CUDA kernel errors synchronous so stack traces are accurate.
+      - CUDA_LAUNCH_BLOCKING=0
     volumes:
       # Bind mounts: data + weights persist on the HOST, never lost on rebuild.
       - ./data:/app/data                 # uploads, thumbs, chroma
       - ./model-cache:/app/model-cache   # HuggingFace / torch / YOLO weights
+      # Live code: edit on host, `docker-compose restart api` — no rebuild/reinstall.
+      # Only rebuild when requirements.txt changes.
+      - ./perception:/app/perception
+      - ./retrieval:/app/retrieval
     extra_hosts:
       - "host.docker.internal:host-gateway"  # reach a host-side Ollama on Linux
-    # ── GPU passthrough (optional) ──────────────────────────────
-    # Requires NVIDIA drivers + the NVIDIA Container Toolkit on the host. The
-    # app auto-detects CUDA and falls back to CPU when absent, so this stays
-    # COMMENTED by default — otherwise `docker-compose up` fails on CPU-only
-    # hosts with "could not select device driver". Uncomment on a GPU box:
-    #
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    # ── GPU passthrough ─────────────────────────────────────────
+    # NVIDIA Container Toolkit detected on host (GTX 1650, 4 GB VRAM).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # Next.js UI (unchanged). Talks to the API from the browser on :8000.
   web:

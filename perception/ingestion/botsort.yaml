@@ -1,0 +1,24 @@
+# Custom BoT-SORT config for Mini-VSS (based on the Ultralytics default).
+# Key differences from the shipped default:
+#   with_reid: True   -> appearance-based re-identification (re-matches a person
+#                        by how they LOOK after occlusion/crossing — the fix for
+#                        person ID reassignment that motion-only ByteTrack can't do).
+#   model: auto       -> use the detector's own features for ReID (no extra weights).
+#   track_buffer: 60  -> keep lost tracks alive longer through detection gaps.
+
+tracker_type: botsort # (str) Tracker backend: botsort
+track_high_thresh: 0.25 # (float) First-stage match threshold
+track_low_thresh: 0.1 # (float) Second-stage threshold for low-score matches
+new_track_thresh: 0.25 # (float) Back to default: real (lower-conf) people must be able to start a track, else they're detected but never counted
+track_buffer: 150 # (int) Keep a lost track alive ~5s (@30fps) so a person who briefly leaves frame can be re-linked on return instead of getting a new id
+match_thresh: 0.8 # (float) Association similarity threshold (IoU/cost)
+fuse_score: True # (bool) Fuse detection score with motion/IoU for matching
+
+# BoT-SORT specifics
+gmc_method: sparseOptFlow # (str) Global motion compensation for moving-camera scenes
+
+# ReID — tuned against person-ID fragmentation (same person getting a new id)
+proximity_thresh: 0.2 # (float) Low: open the proximity gate so appearance ReID can re-link a re-entering person whose box barely overlaps the lost track (appearance_thresh is the real correctness guard)
+appearance_thresh: 0.6 # (float) Moderate (0.5 merged different people -> undercount; 0.8 fragmented). Re-match same person, keep distinct people apart
+with_reid: True # (bool) Enable appearance ReID (the person-ID fix; costs extra compute)
+model: auto # (str) "auto" uses detector features for ReID (no extra download)

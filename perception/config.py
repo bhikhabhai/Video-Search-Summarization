@@ -38,16 +38,52 @@ class Settings(BaseSettings):
     hist_threshold: float = 0.15       # chi-squared distance between colour histograms
     min_scene_gap_sec: float = 1.0     # suppress burst-sampling on fast cuts
     max_gap_sec: float = 3.0           # force a keyframe if this many seconds pass without one
-    analysis_fps: float = 6.0          # frames per second analysed for cuts
+    analysis_fps: float = 20.0         # frames per second analysed for cuts
     analysis_width: int = 640          # decode width for keyframes (aspect preserved)
-    max_keyframes: int = 120           # hard cap per video
+    max_keyframes: int = 120           # hard cap per video (safe for 4 GB VRAM)
 
     # ── Detection (YOLOv8n) ────────────────────────────────────
     detector_model: str = "yolov8n.pt"
     detector_confidence: float = 0.35
-    detector_batch_size: int = 8
+    detector_batch_size: int = 8       # safe for 4 GB VRAM shared with Qwen + CLIP
     # Comma-separated COCO class names; empty string = all 80 classes.
     detector_classes: str = ""
+    # Class-agnostic NMS: collapse overlapping boxes across classes by IoU, so
+    # one vehicle isn't reported as both "car" and "truck". Keeps highest conf.
+    agnostic_nms: bool = True
+    # NMS IoU threshold: boxes overlapping more than this are merged. Default
+    # 0.7 is strict; lower (0.5-0.6) to also merge two boxes on the same person
+    # (prevents a duplicate box spawning a phantom track / new id).
+    nms_iou: float = 0.6
+
+    # ── Weapon detection (fine-tuned YOLOv11m: handgun/long_gun/knife) ──
+    weapon_enabled: bool = False
+    weapon_model: str = "/app/model-cache/weapon_yolov11m.pt"
+    # High confidence to suppress false alarms (phones/tools read as guns).
+    weapon_confidence: float = 0.45
+    weapon_imgsz: int = 640
+    # auto | cpu | cuda. Use cpu on a tiny GPU already holding the caption VLM.
+    weapon_device: str = "auto"
+
+    # ── Tracking (ByteTrack over the whole video) ──────────────
+    # "track" = run YOLO+ByteTrack over every frame, derive keyframes from
+    # track events, and store unique per-class counts. "scene" = the legacy
+    # dual-threshold scene-change extractor (fallback for edited/cut video).
+    keyframe_mode: str = "track"
+    # COCO ids to track: 0 person, 2 car, 3 motorcycle, 5 bus, 7 truck.
+    track_classes: str = "0,2,3,5,7"
+    track_keyframe_period_sec: float = 2.0   # periodic keyframe while objects persist
+    track_min_gap_sec: float = 0.5           # min spacing between keyframes
+    # A track present continuously for this long emits a "loitering" event.
+    track_loiter_sec: float = 10.0
+    # Inference resolution for tracking. Higher detects small/distant people far
+    # more reliably (fewer detection gaps -> fewer ID switches), at more compute.
+    track_imgsz: int = 960
+    # Tracker config file (in perception/ingestion/): botsort.yaml adds
+    # appearance ReID (better person IDs); bytetrack.yaml is motion-only/faster.
+    tracker_config: str = "botsort.yaml"
+    # Save an annotated tracking video (boxes + IDs) to data/tracks_video/.
+    save_track_video: bool = True
 
     # ── Captioning (VLM) ───────────────────────────────────────
     # Backend: "qwen" (Qwen2.5-VL, richest — captions + actions + OCR in one
@@ -63,21 +99,29 @@ class Settings(BaseSettings):
     # Local Qwen2.5-VL batch size: frames captioned per forward pass. >1 keeps
     # the CPU/GPU busier per call (faster throughput) but raises peak RAM/VRAM.
     # Default 1 (no batching); raise cautiously if you have memory headroom.
-    caption_batch_size: int = 1
+    caption_batch_size: int = 1        # MUST be 1 on 4 GB VRAM: Qwen 4-bit ~2.5 GB alone
     # Structured JSON needs headroom or it truncates mid-object; 256 is a safe
     # floor. Raise for very detailed frames; lower to speed up CPU inference.
-    caption_max_new_tokens: int = 256
+    caption_max_new_tokens: int = 192    # lower = less VRAM for KV-cache during generation
+    # Caption output format the VLM is asked for: "flat" (KEY: value lines —
+    # robust for small models, no JSON structure to break) or "json" (strict
+    # JSON — needs a capable model).
+    caption_format: str = "flat"
+    # Where to run the caption VLM: "auto" (GPU if it meets VRAM_THRESHOLD_GB,
+    # else CPU), "cpu" (force CPU — reliable on tiny/shared GPUs like a 3.6 GB
+    # GTX 1650), or "cuda" (force GPU 4-bit even below the threshold).
+    caption_device: str = "auto"
     # Bound Qwen's vision-token budget to keep CPU inference tractable.
     qwen_min_pixels: int = 256 * 28 * 28
-    qwen_max_pixels: int = 768 * 28 * 28
+    qwen_max_pixels: int = 256 * 28 * 28   # minimum; keeps visual tokens small enough for 4 GB GPU
     blip2_model: str = "Salesforce/blip2-opt-2.7b"
     blip_base_model: str = "Salesforce/blip-image-captioning-base"
-    vram_threshold_gb: float = 8.0     # below this, fall back to BLIP base
+    vram_threshold_gb: float = 3.0     # GTX 1650 = 4 GB; 3 GB threshold keeps 4-bit Qwen on GPU
     caption_dedup_threshold: float = 0.92
 
     # ── Pose / action detection (fall / fight / running) ───────
     # Rule-based events from YOLO-pose keypoints, independent of the VLM.
-    pose_enabled: bool = False
+    pose_enabled: bool = False         # disabled: Qwen+CLIP+YOLO saturates 3.62 GB VRAM
     pose_model: str = "yolov8n-pose.pt"
     pose_confidence: float = 0.3        # person detection confidence
     pose_kp_confidence: float = 0.3     # per-keypoint confidence floor
@@ -97,6 +141,10 @@ class Settings(BaseSettings):
     # ── Embeddings (CLIP) ──────────────────────────────────────
     clip_model: str = "ViT-L-14"
     clip_pretrained: str = "openai"
+    # Keep CLIP on CPU so Qwen's visual encoder has the full GPU for activations.
+    # CLIP image-embedding runs after captioning (never concurrently), so this
+    # only adds ~5-10 s/batch of embed time — a worthwhile VRAM trade on 4 GB cards.
+    clip_device: str = "cpu"
 
     # ── Vector store ───────────────────────────────────────────
     chroma_dir: Path = Path("data/chroma")

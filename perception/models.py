@@ -50,6 +50,8 @@ class Detection(BaseModel):
     confidence: float
     # Normalised xyxy in [0, 1] so boxes are resolution-independent.
     bbox: tuple[float, float, float, float]
+    # Track label (e.g. "person_P0002") so events can be tied back to a box.
+    track_id: str = ""
 
 
 class FrameRecord(BaseModel):
@@ -68,6 +70,13 @@ class FrameRecord(BaseModel):
     scene: str = ""                                        # location / indoor-outdoor / lighting
     ocr_text: str = ""                                     # legible signs, labels, number plates
     events: list[str] = Field(default_factory=list)        # handover, fall, fight, running, ...
+    # Per-object colour/shape phrases for configured classes, e.g. "orange backpack".
+    attributes: list[str] = Field(default_factory=list)
+    # Per-object detections with boxes (for drawing on retrieved frames).
+    detections: list[Detection] = Field(default_factory=list)
+    # Events at this keyframe with the triggering track, e.g.
+    # [{"id": "person_P0002", "phrase": "crossed Main Gate tripwire (A->B)"}].
+    frame_events: list[dict] = Field(default_factory=list)
     thumbnail_b64: str = ""
 
 
@@ -114,6 +123,12 @@ class RetrievedFrame(BaseModel):
     scene: str = ""
     ocr_text: str = ""
     events: list[str] = Field(default_factory=list)
+    # Per-object colour/shape phrases for configured classes, e.g. "orange backpack".
+    attributes: list[str] = Field(default_factory=list)
+    # Per-object detections with boxes (for drawing on retrieved frames).
+    detections: list[Detection] = Field(default_factory=list)
+    # Events at this keyframe with the triggering track (see FrameRecord).
+    frame_events: list[dict] = Field(default_factory=list)
     thumbnail_b64: str = ""
     score: float = 0.0
 

@@ -28,10 +28,14 @@ export async function listVideos(): Promise<VideoInfo[]> {
 
 export async function ingestVideo(
   file: File,
+  meta?: File | null,
+  manifest?: File | null,
   signal?: AbortSignal,
 ): Promise<{ job_id: string; video_id: string }> {
   const form = new FormData();
   form.append("file", file);
+  if (meta) form.append("meta", meta); // optional IVA meta.jsonl
+  if (manifest) form.append("manifest", manifest); // optional IVA manifest.jsonl (ROI geometry)
   const res = await fetch(`${API_URL}/ingest`, {
     method: "POST",
     body: form,

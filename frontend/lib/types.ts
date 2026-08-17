@@ -18,6 +18,7 @@ export interface Frame {
   scene?: string;
   ocr_text?: string;
   events?: string[];
+  attributes?: string[];
   thumbnail_b64: string;
   score: number;
 }

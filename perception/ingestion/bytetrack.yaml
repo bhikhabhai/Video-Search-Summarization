@@ -1,0 +1,12 @@
+# Custom ByteTrack config for Mini-VSS (based on the Ultralytics default).
+# Only track_buffer is changed from the shipped defaults: 30 -> 60, so a track
+# survives ~twice as long while temporarily undetected (occlusion / detection
+# dropout) before being deleted and re-appearing with a new ID.
+
+tracker_type: bytetrack # (str) Tracker backend: bytetrack
+track_high_thresh: 0.25 # (float) First-stage match threshold
+track_low_thresh: 0.1 # (float) Second-stage threshold for low-score matches
+new_track_thresh: 0.25 # (float) Start a new track if no match ≥ this
+track_buffer: 60 # (int) Frames to keep lost tracks alive (was 30)
+match_thresh: 0.8 # (float) Association similarity threshold (IoU/cost)
+fuse_score: True # (bool) Fuse detection score with motion/IoU for matching

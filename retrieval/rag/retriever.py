@@ -99,8 +99,9 @@ class HybridRetriever:
                 return tokens
             return [lbl.replace(" ", "_") for lbl in frame.detection_labels]
 
-        # Index caption + expanded labels + OCR text + events + actions so
-        # lexical queries (a plate number, "handover", "fall") can hit directly.
+        # Index caption + expanded labels + OCR text + events + actions +
+        # colour/shape attributes so lexical queries (a plate number, "handover",
+        # "fall", "orange backpack") can hit directly.
         corpus = [
             _tokenize(
                 " ".join([
@@ -109,6 +110,7 @@ class HybridRetriever:
                     f.ocr_text,
                     " ".join(f.events),
                     " ".join(f.actions),
+                    " ".join(f.attributes),
                 ])
             )
             for f in frames

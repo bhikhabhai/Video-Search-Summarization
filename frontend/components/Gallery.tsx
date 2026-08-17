@@ -206,6 +206,21 @@ function Lightbox({
             </Detail>
           )}
 
+          {frame.attributes && frame.attributes.length > 0 && (
+            <Detail label="Items (colour / shape)">
+              <div className="flex flex-wrap gap-1.5">
+                {frame.attributes.map((a) => (
+                  <span
+                    key={a}
+                    className="rounded-full border border-sky-800 bg-sky-950/40 px-2.5 py-0.5 text-xs text-sky-300"
+                  >
+                    {a}
+                  </span>
+                ))}
+              </div>
+            </Detail>
+          )}
+
           <div>
             <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-neutral-500">
               Detected objects

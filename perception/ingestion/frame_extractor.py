@@ -199,7 +199,17 @@ class FrameExtractor:
                 yield idx, timestamp, rgb
                 idx += 1
         finally:
-            process.stdout.close()
+            # On an early stop (e.g. MAX_KEYFRAMES reached, or the caller stops
+            # iterating) the consumer quits before FFmpeg is done. Kill FFmpeg
+            # first so it doesn't spam "Broken pipe" trying to write into the
+            # pipe we're about to close. On normal completion it has already
+            # exited, so this is a no-op.
+            if process.poll() is None:
+                process.kill()
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
             process.wait()
 
     def extract(self, meta: VideoMeta) -> list[ExtractedFrame]:

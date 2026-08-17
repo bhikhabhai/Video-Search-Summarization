@@ -30,6 +30,8 @@ class Detector:
         settings = get_settings()
         self.model_name = settings.detector_model
         self.confidence = settings.detector_confidence
+        self.agnostic_nms = settings.agnostic_nms
+        self.nms_iou = settings.nms_iou
         self.batch_size = settings.detector_batch_size
         self.class_filter: set[str] = {
             name.strip().lower()
@@ -63,7 +65,8 @@ class Detector:
         for start in range(0, len(images), self.batch_size):
             batch = images[start : start + self.batch_size]
             try:
-                outputs = model(batch, conf=self.confidence, verbose=False)
+                outputs = model(batch, conf=self.confidence, iou=self.nms_iou,
+                                agnostic_nms=self.agnostic_nms, verbose=False)
             except Exception:
                 logger.exception(
                     "Detection failed for frames %d-%d; returning empty detections",

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import chromadb
 import numpy as np
+from chromadb.config import Settings as ChromaSettings
 
 from perception.config import get_settings
 from perception.models import FrameRecord, RetrievedFrame, VideoSummaryInfo
@@ -37,7 +38,13 @@ class VectorStore:
         settings = get_settings()
         self.persist_dir = persist_dir or settings.chroma_dir
         self.persist_dir.mkdir(parents=True, exist_ok=True)
-        self._client = chromadb.PersistentClient(path=str(self.persist_dir))
+        # Disable anonymized telemetry: on some chromadb/posthog version combos
+        # it raises "capture() takes 1 positional argument but 3 were given" on
+        # every collection op — harmless but very noisy. This silences it.
+        self._client = chromadb.PersistentClient(
+            path=str(self.persist_dir),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
         self._collection = self._client.get_or_create_collection(
             name=_COLLECTION, metadata={"hnsw:space": "cosine"}
         )
@@ -69,6 +76,9 @@ class VectorStore:
                     "scene": r.scene,
                     "ocr_text": r.ocr_text,
                     "events": json.dumps(r.events),
+                    "attributes": json.dumps(r.attributes),
+                    "detections": json.dumps([d.model_dump() for d in r.detections]),
+                    "frame_events": json.dumps(r.frame_events),
                     "thumbnail_b64": r.thumbnail_b64,
                 }
                 for r in records
@@ -77,23 +87,21 @@ class VectorStore:
         logger.info("Stored %d frames for video %s", len(records), records[0].video_id)
 
     @staticmethod
+    def _json_or(raw, default):
+        try:
+            return json.loads(raw) if raw else default
+        except (json.JSONDecodeError, TypeError):
+            return default
+
+    @staticmethod
     def _meta_to_frame(meta: dict, score: float = 0.0) -> RetrievedFrame:
         labels = [l for l in str(meta.get("detection_labels", "")).split(",") if l]
-        counts_raw = meta.get("detection_counts", "{}")
-        try:
-            counts: dict[str, int] = json.loads(counts_raw) if counts_raw else {}
-        except (json.JSONDecodeError, TypeError):
-            counts = {}
-        actions_raw = meta.get("actions", "[]")
-        try:
-            actions: list[str] = json.loads(actions_raw) if actions_raw else []
-        except (json.JSONDecodeError, TypeError):
-            actions = []
-        events_raw = meta.get("events", "[]")
-        try:
-            events: list[str] = json.loads(events_raw) if events_raw else []
-        except (json.JSONDecodeError, TypeError):
-            events = []
+        counts = VectorStore._json_or(meta.get("detection_counts", "{}"), {})
+        actions = VectorStore._json_or(meta.get("actions", "[]"), [])
+        events = VectorStore._json_or(meta.get("events", "[]"), [])
+        attributes = VectorStore._json_or(meta.get("attributes", "[]"), [])
+        detections = VectorStore._json_or(meta.get("detections", "[]"), [])
+        frame_events = VectorStore._json_or(meta.get("frame_events", "[]"), [])
         return RetrievedFrame(
             video_id=str(meta["video_id"]),
             frame_idx=int(meta["frame_idx"]),
@@ -104,7 +112,10 @@ class VectorStore:
             actions=actions,
             scene=str(meta.get("scene", "")),
             ocr_text=str(meta.get("ocr_text", "")),
+            attributes=attributes,
             events=events,
+            detections=detections,
+            frame_events=frame_events,
             thumbnail_b64=str(meta.get("thumbnail_b64", "")),
             score=round(score, 4),
         )
