@@ -136,8 +136,11 @@ class IVALoader:
         w = float(meta.width or 1)
         h = float(meta.height or 1)
         regions = parse_manifest_regions(manifest_path, w, h) if manifest_path else []
+        from perception.inference.temporal_action import PoseActionRunner
+
         picker = KeyframePicker(self.period, self.min_gap)
         deriver = EventDeriver(self.loiter_sec)
+        pose_runner = PoseActionRunner()
         tracks: dict[str, dict] = {}
         keyframes: list[ExtractedFrame] = []
         kf_dets: list[list[Detection]] = []
@@ -190,19 +193,33 @@ class IVALoader:
                     # Each is {"id": <track label>, "phrase": <text>}.
                     events = deriver.step(ts, active, _label, lambda o: tracks[o]["t_start"])
                     events += [render_iva_event(ev, _label) for ev in rec.get("events", [])]
-                    for e in events:
-                        video_events.append({"t": round(ts, 2), "event": e["phrase"]})
 
                     # Advance the decoder one frame (assumes one meta line per frame).
                     grabbed = cap.grab()
+                    bgr = None  # decoded frame, reused for pose + keyframe
+
+                    # Temporal pose on person-frames — may add fall/fight/handshake
+                    # events that then force a keyframe below.
+                    person_boxes = {d.track_id: d.bbox for d in dets if d.label == "person"}
+                    if person_boxes and pose_runner.enabled and grabbed:
+                        ok, bgr = cap.retrieve()
+                        if ok:
+                            events += pose_runner.step(bgr, ts, person_boxes)
+                        else:
+                            bgr = None
+
+                    for e in events:
+                        video_events.append({"t": round(ts, 2), "event": e["phrase"]})
+
                     is_kf = picker.emit(ts, frozenset(active))
                     if events and not is_kf:
                         is_kf = True
                         picker.mark(ts, frozenset(active))
                     if is_kf and len(keyframes) < self.max_keyframes:
-                        ok, bgr = cap.retrieve() if grabbed else (False, None)
-                        if not ok:
-                            continue
+                        if bgr is None:
+                            ok, bgr = cap.retrieve() if grabbed else (False, None)
+                            if not ok:
+                                continue
                         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                         keyframes.append(
                             ExtractedFrame(
@@ -221,6 +238,7 @@ class IVALoader:
                         kf_facts.append(facts)
         finally:
             cap.release()
+            pose_runner.unload()  # free pose VRAM before the caption VLM loads
 
         summary = _summarise(tracks)
         summary["events"] = video_events

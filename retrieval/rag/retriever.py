@@ -25,7 +25,6 @@ import logging
 import re
 
 import numpy as np
-from rank_bm25 import BM25Okapi
 
 from perception.config import get_settings
 from perception.inference.embedder import Embedder
@@ -40,6 +39,9 @@ CLIP_WEIGHT = 0.6
 BM25_WEIGHT = 0.4
 RERANK_POOL = 10
 RERANK_BLEND = 0.5  # final = 0.5 * fused + 0.5 * rerank
+# ANN/FTS candidate pool per channel — bounded so retrieval stays O(candidates),
+# not O(frames-in-video). Big enough to feed the rerank pool with good recall.
+CANDIDATE_CAP = 300
 
 
 def _tokenize(text: str) -> list[str]:
@@ -67,60 +69,46 @@ class HybridRetriever:
         self.store = store
         self.embedder = embedder
 
-    def search(self, video_id: str, query: str, top_k: int | None = None) -> list[RetrievedFrame]:
-        """Return the ``top_k`` most relevant frames of ``video_id`` for ``query``."""
+    def search(
+        self, video_id: str, query: str, top_k: int | None = None,
+        t_start: float | None = None, t_end: float | None = None,
+    ) -> list[RetrievedFrame]:
+        """Return the ``top_k`` most relevant frames of ``video_id`` for ``query``.
+
+        Both channels pull a *bounded* candidate set (ANN for CLIP, FTS5 BM25 for
+        lexical) rather than scoring every frame in the video, so cost scales with
+        the candidate pool, not the corpus. An optional ``[t_start, t_end]``
+        timestamp window (seconds into the clip) narrows both channels.
+        """
         top_k = top_k or get_settings().retrieval_top_k
-        frames = self.store.get_by_video_id(video_id)
-        if not frames:
-            logger.warning("No frames stored for video %s", video_id)
+        candidate_k = min(max(top_k, RERANK_POOL) * 5, CANDIDATE_CAP)
+
+        # ── Channel 1: CLIP text→image ANN.  Channel 2: FTS5 BM25 lexical. ──
+        clip_hits = self.store.search_by_text(
+            query, self.embedder, video_id, top_k=candidate_k, t_start=t_start, t_end=t_end
+        )
+        lex_hits = self.store.search_lexical(
+            query, video_id, top_k=candidate_k, t_start=t_start, t_end=t_end
+        )
+
+        # ── Union the two candidate sets, keeping each channel's score ─────
+        merged: dict[tuple[str, int], dict] = {}
+        for h in clip_hits:
+            merged[(h.video_id, h.frame_idx)] = {"frame": h, "clip": h.score, "bm25": 0.0}
+        for h in lex_hits:
+            key = (h.video_id, h.frame_idx)
+            if key in merged:
+                merged[key]["bm25"] = h.score
+            else:
+                merged[key] = {"frame": h, "clip": 0.0, "bm25": h.score}
+        if not merged:
+            logger.warning("No candidates for video %s query %r", video_id, query)
             return []
 
-        # ── Channel 1: CLIP text→image similarity ──────────────
-        # Query the vector store for similarity against every frame so the
-        # two channels score an identical candidate set.
-        clip_hits = self.store.search_by_text(
-            query, self.embedder, video_id, top_k=len(frames)
-        )
-        clip_by_key = {(h.video_id, h.frame_idx): h.score for h in clip_hits}
-        clip_scores = np.array(
-            [clip_by_key.get((f.video_id, f.frame_idx), 0.0) for f in frames],
-            dtype=np.float32,
-        )
-
-        # ── Channel 2: BM25 over captions + detection labels ───
-        # Expand each detected label by its count so "person person person"
-        # ranks higher than "person" for count-based queries (e.g. "how many
-        # persons?"). Fall back to unique labels when counts are absent.
-        def _label_tokens(frame: RetrievedFrame) -> list[str]:
-            if frame.detection_counts:
-                tokens: list[str] = []
-                for label, count in frame.detection_counts.items():
-                    tokens.extend([label.replace(" ", "_")] * count)
-                return tokens
-            return [lbl.replace(" ", "_") for lbl in frame.detection_labels]
-
-        # Index caption + expanded labels + OCR text + events + actions +
-        # colour/shape attributes so lexical queries (a plate number, "handover",
-        # "fall", "orange backpack") can hit directly.
-        corpus = [
-            _tokenize(
-                " ".join([
-                    f.caption,
-                    " ".join(_label_tokens(f)),
-                    f.ocr_text,
-                    " ".join(f.events),
-                    " ".join(f.actions),
-                    " ".join(f.attributes),
-                ])
-            )
-            for f in frames
-        ]
-        query_tokens = _tokenize(query)
-        if any(corpus) and query_tokens:
-            bm25 = BM25Okapi([tokens or ["<empty>"] for tokens in corpus])
-            bm25_scores = np.array(bm25.get_scores(query_tokens), dtype=np.float32)
-        else:
-            bm25_scores = np.zeros(len(frames), dtype=np.float32)
+        entries = list(merged.values())
+        frames = [e["frame"] for e in entries]
+        clip_scores = np.array([e["clip"] for e in entries], dtype=np.float32)
+        bm25_scores = np.array([e["bm25"] for e in entries], dtype=np.float32)
 
         # ── Fusion ─────────────────────────────────────────────
         fused = CLIP_WEIGHT * _minmax(clip_scores) + BM25_WEIGHT * _minmax(bm25_scores)

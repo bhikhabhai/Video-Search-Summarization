@@ -105,6 +105,9 @@ class IngestStatus(BaseModel):
 class QueryRequest(BaseModel):
     video_id: str
     question: str
+    # Optional time window (seconds into the clip) to narrow retrieval.
+    t_start: float | None = None
+    t_end: float | None = None
 
 
 class RetrievedFrame(BaseModel):

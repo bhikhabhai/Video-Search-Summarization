@@ -198,8 +198,11 @@ class VideoTracker:
 
         model = self._load()
         fps = meta.fps or 25.0
+        from perception.inference.temporal_action import PoseActionRunner
+
         picker = KeyframePicker(self.period, self.min_gap)
         deriver = EventDeriver(self.loiter_sec)
+        pose_runner = PoseActionRunner()
         tracks: dict[int, dict] = {}
         keyframes: list[ExtractedFrame] = []
         kf_dets: list[list[Detection]] = []
@@ -270,10 +273,14 @@ class VideoTracker:
                             )
                         )
 
-                # Derived events (entered/left/loitering) from track lifecycle.
+                # Derived events (entered/left/loitering) from track lifecycle,
+                # plus temporal pose actions (fall/running/handshake/fight) — same
+                # {id, phrase} shape, so they merge into one event stream.
                 events = deriver.step(
                     ts, active, _label, lambda t: tracks[t]["t_start"]
                 )
+                person_boxes = {d.track_id: d.bbox for d in dets if d.label == "person"}
+                events += pose_runner.step(r.orig_img, ts, person_boxes)
                 for e in events:
                     video_events.append({"t": round(ts, 2), "event": e["phrase"]})
 
@@ -308,6 +315,8 @@ class VideoTracker:
             if writer is not None:
                 writer.release()
                 logger.info("Wrote tracking video -> %s", out_path)
+            # Free the pose model from VRAM before the caption VLM loads.
+            pose_runner.unload()
 
         summary = _summarise(tracks, model.names)
         summary["events"] = video_events

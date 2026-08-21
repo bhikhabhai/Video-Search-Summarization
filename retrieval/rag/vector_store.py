@@ -1,8 +1,13 @@
 """ChromaDB-backed persistent store for frame records + a tiny video registry.
 
-Document schema per frame (stored as Chroma metadata):
-    {video_id, frame_idx, timestamp_sec, caption, detection_labels,
-     thumbnail_b64}
+Frame text/metadata is stored as Chroma metadata (caption, detection_labels,
+events, …). Two things deliberately live OUTSIDE the vector DB:
+
+  * **Thumbnails** — JPEGs on disk at ``<data>/thumbs/<video_id>/<frame_idx>.jpg``
+    (see :meth:`save_thumbnail`/:meth:`load_thumbnail`). Keeping base64 JPEGs out
+    of Chroma shrinks the DB ~60x and keeps them off the query read path.
+  * **A lexical index** — a persistent SQLite FTS5 store (:class:`FTSIndex`) so
+    BM25 lexical search is a single indexed query, not a per-request rebuild.
 
 Embeddings are supplied by the caller (CLIP image vectors at ingest time,
 CLIP text vectors at query time) — Chroma's built-in embedding functions are
@@ -14,8 +19,10 @@ powers the UI's video dropdown without scanning the whole collection.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import shutil
 import threading
 from pathlib import Path
 
@@ -25,10 +32,21 @@ from chromadb.config import Settings as ChromaSettings
 
 from perception.config import get_settings
 from perception.models import FrameRecord, RetrievedFrame, VideoSummaryInfo
+from retrieval.rag.fts_index import FTSIndex
 
 logger = logging.getLogger(__name__)
 
 _COLLECTION = "frames"
+
+
+def _time_where(video_id: str, t_start: float | None, t_end: float | None) -> dict:
+    """Chroma ``where`` filter: this video, optionally within a timestamp range."""
+    clauses: list[dict] = [{"video_id": video_id}]
+    if t_start is not None:
+        clauses.append({"timestamp_sec": {"$gte": t_start}})
+    if t_end is not None:
+        clauses.append({"timestamp_sec": {"$lte": t_end}})
+    return clauses[0] if len(clauses) == 1 else {"$and": clauses}
 
 
 class VectorStore:
@@ -48,8 +66,48 @@ class VectorStore:
         self._collection = self._client.get_or_create_collection(
             name=_COLLECTION, metadata={"hnsw:space": "cosine"}
         )
+        # Thumbnails live on disk (sibling to the Chroma dir), NOT in metadata —
+        # keeps the vector DB ~60x smaller and query reads off the JPEG hot path.
+        self.thumbs_dir = self.persist_dir.parent / "thumbs"
+        # Persistent lexical index (replaces per-query BM25Okapi rebuilds).
+        self._fts = FTSIndex(self.persist_dir / "fts.sqlite3")
         self._registry_path = self.persist_dir / "videos.json"
         self._registry_lock = threading.Lock()
+
+    # ── Thumbnails (on disk) ───────────────────────────────────
+
+    def _thumb_path(self, video_id: str, frame_idx: int) -> Path:
+        return self.thumbs_dir / video_id / f"{frame_idx}.jpg"
+
+    def save_thumbnail(self, video_id: str, frame_idx: int, jpeg_bytes: bytes) -> None:
+        path = self._thumb_path(video_id, frame_idx)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(jpeg_bytes)
+
+    def load_thumbnail(self, video_id: str, frame_idx: int) -> str:
+        """Base64 JPEG for one keyframe, or "" if the file is missing."""
+        path = self._thumb_path(video_id, frame_idx)
+        if path.is_file():
+            return base64.b64encode(path.read_bytes()).decode()
+        return ""
+
+    @staticmethod
+    def _fts_body(r: FrameRecord) -> str:
+        """Lexical blob: caption + labels (expanded by count) + ocr + events + …
+
+        Expanding labels by their count ("person person person") lets count-style
+        lexical queries rank multi-object frames higher, matching the old BM25
+        corpus construction.
+        """
+        if r.detection_counts:
+            labels = [lbl.replace(" ", "_")
+                      for lbl, n in r.detection_counts.items() for _ in range(n)]
+        else:
+            labels = [lbl.replace(" ", "_") for lbl in r.detection_labels]
+        return " ".join([
+            r.caption, " ".join(labels), r.ocr_text,
+            " ".join(r.events), " ".join(r.actions), " ".join(r.attributes),
+        ])
 
     # ── Frames ─────────────────────────────────────────────────
 
@@ -79,11 +137,16 @@ class VectorStore:
                     "attributes": json.dumps(r.attributes),
                     "detections": json.dumps([d.model_dump() for d in r.detections]),
                     "frame_events": json.dumps(r.frame_events),
-                    "thumbnail_b64": r.thumbnail_b64,
+                    # thumbnail_b64 intentionally NOT stored here — it lives on
+                    # disk (see save_thumbnail); keeping JPEGs out of the vector
+                    # DB is the single biggest storage + query-latency win.
                 }
                 for r in records
             ],
         )
+        self._fts.add([
+            (r.video_id, r.frame_idx, r.timestamp_sec, self._fts_body(r)) for r in records
+        ])
         logger.info("Stored %d frames for video %s", len(records), records[0].video_id)
 
     @staticmethod
@@ -121,12 +184,18 @@ class VectorStore:
         )
 
     def search_by_embedding(
-        self, query_embedding: np.ndarray, video_id: str, top_k: int = 5
+        self, query_embedding: np.ndarray, video_id: str, top_k: int = 5,
+        t_start: float | None = None, t_end: float | None = None,
     ) -> list[RetrievedFrame]:
-        """Cosine-similarity search over one video's frames."""
+        """Approximate-NN cosine search over one video's frames (HNSW).
+
+        ``top_k`` bounds the candidate pool returned by HNSW — the caller no
+        longer passes ``len(frames)``, so this is a real ANN lookup, not a full
+        scan. An optional ``[t_start, t_end]`` timestamp window pre-filters.
+        """
         result = self._collection.query(
             query_embeddings=[query_embedding.astype(np.float32).tolist()],
-            where={"video_id": video_id},
+            where=_time_where(video_id, t_start, t_end),
             n_results=top_k,
         )
         frames: list[RetrievedFrame] = []
@@ -138,15 +207,52 @@ class VectorStore:
         return frames
 
     def search_by_text(
-        self, query: str, embedder, video_id: str, top_k: int = 5
+        self, query: str, embedder, video_id: str, top_k: int = 5,
+        t_start: float | None = None, t_end: float | None = None,
     ) -> list[RetrievedFrame]:
-        """Embed ``query`` with the supplied CLIP embedder and search."""
-        return self.search_by_embedding(embedder.embed_text(query), video_id, top_k)
+        """Embed ``query`` with the supplied CLIP embedder and ANN-search."""
+        return self.search_by_embedding(
+            embedder.embed_text(query), video_id, top_k, t_start, t_end
+        )
 
-    def get_by_video_id(self, video_id: str) -> list[RetrievedFrame]:
-        """Return all frames of a video, ordered by timestamp."""
+    def search_lexical(
+        self, query: str, video_id: str, top_k: int = 5,
+        t_start: float | None = None, t_end: float | None = None,
+    ) -> list[RetrievedFrame]:
+        """Top lexical (FTS5 BM25) matches for ``query`` in one video."""
+        hits = self._fts.search(video_id, query, top_k, t_start, t_end)
+        if not hits:
+            return []
+        by_idx = {f.frame_idx: f for f in self.get_by_ids(video_id, [i for i, _ in hits])}
+        out: list[RetrievedFrame] = []
+        for idx, score in hits:
+            frame = by_idx.get(idx)
+            if frame is not None:
+                frame.score = round(score, 4)
+                out.append(frame)
+        return out
+
+    def get_by_ids(self, video_id: str, frame_idxs: list[int]) -> list[RetrievedFrame]:
+        """Fetch specific frames by id (no thumbnails loaded)."""
+        if not frame_idxs:
+            return []
+        result = self._collection.get(ids=[f"{video_id}:{i}" for i in frame_idxs])
+        return [self._meta_to_frame(meta) for meta in (result.get("metadatas") or [])]
+
+    def get_by_video_id(
+        self, video_id: str, with_thumbnails: bool = False
+    ) -> list[RetrievedFrame]:
+        """Return all frames of a video, ordered by timestamp.
+
+        Thumbnails are loaded from disk only when ``with_thumbnails`` is set
+        (e.g. the /frames gallery); query/summary paths skip them and load the
+        handful they actually render lazily.
+        """
         result = self._collection.get(where={"video_id": video_id})
         frames = [self._meta_to_frame(meta) for meta in (result.get("metadatas") or [])]
+        if with_thumbnails:
+            for f in frames:
+                f.thumbnail_b64 = self.load_thumbnail(f.video_id, f.frame_idx)
         frames.sort(key=lambda f: f.timestamp_sec)
         return frames
 
@@ -159,6 +265,10 @@ class VectorStore:
         ids = existing.get("ids") or []
         if ids:
             self._collection.delete(ids=ids)
+        self._fts.delete(video_id)
+        thumb_dir = self.thumbs_dir / video_id
+        if thumb_dir.is_dir():
+            shutil.rmtree(thumb_dir, ignore_errors=True)
 
         with self._registry_lock:
             registry = self._read_registry()

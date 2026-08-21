@@ -121,13 +121,13 @@ app.add_middleware(
 # ── Background ingestion ───────────────────────────────────────
 
 
-def _thumbnail_b64(frame: ExtractedFrame, width: int = 480) -> str:
+def _thumbnail_bytes(frame: ExtractedFrame, width: int = 480) -> bytes:
     img = frame.pil_image.copy()
     ratio = width / img.width
     img = img.resize((width, max(1, int(img.height * ratio))), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=92)
-    return base64.b64encode(buf.getvalue()).decode()
+    return buf.getvalue()
 
 
 # Synonyms/plurals so "people"/"men" match a "person" box, "cars" a "vehicle", etc.
@@ -172,6 +172,9 @@ _EVENT_QUERY_WORDS = {
     # Weapon terms — so "any weapons?"/"gun" highlights the weapon detections.
     "weapon", "weapons", "gun", "guns", "firearm", "firearms", "pistol",
     "handgun", "rifle", "rifles", "shotgun", "knife", "knives", "armed",
+    # Temporal pose actions.
+    "handshake", "shaking", "hands", "handover", "sudden", "movement",
+    "anomaly", "waving", "punch",
 }
 _GENERIC_EVENT_WORDS = {"event", "events", "alert", "alerts", "happened", "happening"}
 
@@ -318,6 +321,15 @@ def _run_ingest(
         status.keyframe_count = len(frames)
         images = [f.pil_image for f in frames]
 
+        # Pose events (optional) — run up front (at "tracker time"), then free
+        # the pose model from VRAM so the caption VLM gets that memory back.
+        if p.pose.enabled:
+            update(48, "detecting pose-based events (fall/fight/running)")
+            pose_events_per_frame = p.pose.events_batch(images)
+            p.pose.unload()
+        else:
+            pose_events_per_frame = [[] for _ in images]
+
         # Weapon detection (optional) — before captioning so the VLM is told a
         # weapon is present; results are merged into detections/events below.
         if p.weapon.enabled:
@@ -352,12 +364,6 @@ def _run_ingest(
             ocr_per_frame = p.ocr.read_batch(images)
         else:
             ocr_per_frame = [[] for _ in images]
-
-        if p.pose.enabled:
-            update(80, "detecting pose-based events (fall/fight/running)")
-            pose_events_per_frame = p.pose.events_batch(images)
-        else:
-            pose_events_per_frame = [[] for _ in images]
 
         update(85, "embedding keyframes")
         embeddings = p.embedder.embed_images(images)
@@ -407,8 +413,12 @@ def _run_ingest(
                     detections=dets,
                     # Analytics events at this keyframe (with triggering track id).
                     frame_events=fevents,
-                    thumbnail_b64=_thumbnail_b64(frame),
+                    # Thumbnail lives on disk (below), not in the vector DB.
+                    thumbnail_b64="",
                 )
+            )
+            p.store.save_thumbnail(
+                meta.video_id, frame.frame_idx, _thumbnail_bytes(frame)
             )
         p.store.add_frames(records, embeddings)
         p.store.register_video(
@@ -671,7 +681,11 @@ async def query(request: QueryRequest) -> StreamingResponse:
     p = pipeline()
     loop = asyncio.get_running_loop()
     frames = await loop.run_in_executor(
-        None, p.retriever.search, request.video_id, request.question
+        None,
+        lambda: p.retriever.search(
+            request.video_id, request.question,
+            t_start=request.t_start, t_end=request.t_end,
+        ),
     )
     if not frames:
         raise HTTPException(404, f"No indexed frames for video {request.video_id}")
@@ -723,7 +737,10 @@ async def query(request: QueryRequest) -> StreamingResponse:
     def generate() -> Iterator[str]:
         # Ship the supporting frames first so the UI can render thumbnails:
         # the semantic top-K plus any frames matching a discriminative query
-        # term (for enumeration), chronological and capped.
+        # term (for enumeration), chronological and capped. Thumbnails are loaded
+        # from disk here — only for the handful of frames we actually render.
+        for f in display_frames:
+            f.thumbnail_b64 = p.store.load_thumbnail(f.video_id, f.frame_idx)
         yield "\x00FRAMES:" + json.dumps(
             [f.model_dump(exclude={"thumbnail_b64"})
              | {"thumbnail_b64": _boxed_thumbnail(f, request.question, regions)}
@@ -756,14 +773,14 @@ async def clip(video_id: str, q: str) -> dict:
         "video_id": best.video_id,
         "timestamp_sec": best.timestamp_sec,
         "caption": best.caption,
-        "thumbnail_b64": best.thumbnail_b64,
+        "thumbnail_b64": p.store.load_thumbnail(best.video_id, best.frame_idx),
         "score": best.score,
     }
 
 
 @app.get("/frames/{video_id}")
 async def frames(video_id: str) -> list[RetrievedFrame]:
-    result = pipeline().store.get_by_video_id(video_id)
+    result = pipeline().store.get_by_video_id(video_id, with_thumbnails=True)
     if not result:
         raise HTTPException(404, f"No indexed frames for video {video_id}")
     return result

@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     pose_confidence: float = 0.3        # person detection confidence
     pose_kp_confidence: float = 0.3     # per-keypoint confidence floor
     crowd_person_threshold: int = 5     # >= this many people => "crowding"
+    # Temporal (multi-frame) pose actions during the track pass: run pose on
+    # every person-frame, buffer per track id, detect fall/running/handshake/
+    # fight/sudden-movement from the motion. Independent of POSE_ENABLED.
+    pose_action_enabled: bool = False
 
     # ── OCR (dedicated text / number-plate reading) ────────────
     # Backend: "none" (rely on the VLM caption's OCR), "paddle" (local

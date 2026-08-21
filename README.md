@@ -19,6 +19,14 @@ to run on a **single GPU or CPU-only**.
 
 ---
 
+## Documentation
+
+| Document | Read it when |
+|---|---|
+| **README.md** (this file) | You want to run it, configure it, or see what it does |
+| **[PIPELINE.md](PIPELINE.md)** | You want to know exactly what happens to a video, file by file |
+| **[AGENTS.md](AGENTS.md)** | You (or an AI assistant) are about to change the code — hardware constraints, dev loop, conventions, current state, gotchas |
+
 ## Table of contents
 
 - [What it does](#what-it-does)
@@ -80,17 +88,21 @@ into structured observations; **`retrieval/`** indexes them and answers question
      │                                      │     │                                  │
      │  ingestion/                          │     │  rag/                            │
      │    • video_loader   FFmpeg probe     │     │    • vector_store  ChromaDB      │
-     │    • frame_extractor  scene cuts     │     │    • retriever     CLIP ⊕ BM25   │
-     │  inference/  (the vision models)     │     │    • summariser    map-reduce    │
-     │    • detector    YOLOv8              │     │            │                     │
-     │    • captioner   Qwen2.5-VL / BLIP   │     │            ▼                     │
-     │    • ocr         PaddleOCR / Ollama  │     │   LLM   Anthropic / Ollama       │
-     │    • pose        YOLO-pose + rules   │     └──────────────────────────────────┘
+     │    • tracker      YOLO + ByteTrack   │     │    • fts_index     SQLite FTS5   │
+     │    • iva_loader   external analytics │     │    • retriever     CLIP ⊕ BM25   │
+     │    • frame_extractor  scene cuts     │     │    • summariser    map-reduce    │
+     │  inference/  (the vision models)     │     │            │                     │
+     │    • detector    YOLOv8              │     │            ▼                     │
+     │    • weapon      YOLOv11m fine-tune  │     │   LLM   Anthropic / Ollama       │
+     │    • captioner   Qwen2.5-VL / BLIP   │     └──────────────────────────────────┘
+     │    • ocr         PaddleOCR / Ollama  │
+     │    • pose        YOLO-pose + rules   │
+     │    • temporal_action  per-track pose │
      │    • embedder    CLIP                │
      └──────────────┬───────────────────────┘
                     │  FrameRecord{ caption, objects, ocr_text, events, embedding }
                     ▼
-               ChromaDB  ◄──────────────────  retriever reads at query time
+       ChromaDB + FTS5 + thumbs/  ◄────────  retriever reads at query time
 ```
 
 Dependencies flow one way — `retrieval` imports from `perception`, never the
@@ -104,11 +116,13 @@ foundation.
 | API | FastAPI + Uvicorn (async, SSE streaming) |
 | UI | Next.js 14 (App Router) + Tailwind |
 | Object detection | YOLOv8 (Ultralytics) |
-| Captioning (VLM) | Qwen2.5-VL-3B · BLIP fallback · Ollama backend |
+| Tracking | ByteTrack / BoT-SORT (appearance ReID) |
+| Weapons | fine-tuned YOLOv11m (handgun / long_gun / knife) |
+| Captioning (VLM) | Qwen2.5-VL-3B (4-bit) · BLIP fallback · Ollama backend |
 | OCR | PaddleOCR or an Ollama vision model |
-| Pose / actions | YOLOv8-pose + a rule engine |
-| Embeddings | CLIP (open_clip) |
-| Vector store | ChromaDB (local, persistent) |
+| Pose / actions | YOLOv8-pose + single-frame rules and per-track temporal actions |
+| Embeddings | CLIP ViT-L/14, 768-d (open_clip) |
+| Vector store | ChromaDB (local, persistent) + SQLite FTS5 lexical index |
 | Retrieval | Hybrid CLIP + BM25 + cross-similarity re-rank (no LangChain) |
 | LLM | Anthropic Claude _or_ local/network Ollama |
 | Packaging | Docker + Docker Compose |
@@ -150,22 +164,31 @@ curl http://localhost:8000/status/<job_id>                 # ingestion progress 
 
 ## How it works
 
+> Full detail, file by file, in **[PIPELINE.md](PIPELINE.md)**.
+
 **Ingestion** (background job, 0–100% progress):
 
-1. **Probe & sample** — FFmpeg reads the video; keyframes are chosen by
-   **dual-threshold scene-change detection** (a cut fires only when the pixel
-   diff *and* the χ² colour-histogram distance both exceed thresholds), with a
-   time-based fallback so static-camera activity is still sampled.
-2. **Perceive each keyframe** — YOLO detection → a VLM emits a **structured JSON**
+1. **Probe & track** — FFmpeg reads the video; **YOLO + ByteTrack** runs over
+   every frame and picks keyframes when the set of active track IDs changes, on
+   a periodic tick, or when an event fires (tripwire, loiter, pose action). An
+   attached IVA `meta.jsonl` replaces tracking with replayed analytics; the
+   legacy dual-threshold scene-cut extractor remains as a fallback mode.
+2. **Perceive each keyframe** — weapon detection → a VLM emits a **structured**
    observation (scene, people, interactions, objects, vehicles, on-screen text,
-   events) → dedicated OCR → pose-based action rules → CLIP embedding.
-3. **Index** — everything is written to ChromaDB with the frame's metadata.
+   events), guided by the detections and track facts → dedicated OCR → CLIP
+   embedding. Deterministic analytics events are folded into the caption text so
+   they are always searchable regardless of what the VLM wrote.
+3. **Index** — metadata into ChromaDB, lexical text into SQLite FTS5, thumbnails
+   onto disk, per-video track/event summary into `data/tracks/`.
 
 **Query:**
 
-- **Ask / Retrieve** — the question is embedded and fused with a BM25 keyword
-  score over captions, OCR text, and events; the top candidates are re-ranked by
-  query↔caption cross-similarity, then a grounded answer is streamed by the LLM.
+- **Ask / Retrieve** — the question is embedded (CLIP ANN) and fused with an FTS5
+  BM25 lexical score over captions, labels, OCR text and events; both channels
+  pull a *bounded* candidate pool, so cost scales with the pool rather than the
+  video length. Top candidates are re-ranked by query↔caption cross-similarity,
+  the deterministic event timeline is prepended, then a grounded answer streams
+  from the LLM.
 - **Summarize** — frames are grouped into time windows, each window is summarized,
   and the summaries are recursively merged and streamed.
 
@@ -173,30 +196,42 @@ curl http://localhost:8000/status/<job_id>                 # ingestion progress 
 
 ```
 VSS/
+├── AGENTS.md                   # context brief for AI assistants (constraints, conventions)
+├── PIPELINE.md                 # how a video flows from upload to answer
+│
 ├── perception/                 # turn video → structured observations
 │   ├── config.py               #   central settings + GPU/VRAM detection (shared)
 │   ├── models.py               #   shared Pydantic schemas (shared)
 │   ├── ingestion/
 │   │   ├── video_loader.py     #   FFmpeg probe, limits, RTSP support
+│   │   ├── tracker.py          #   YOLO + ByteTrack → keyframes, tracks, events
+│   │   ├── iva_loader.py       #   replay external IVA meta/manifest jsonl
 │   │   └── frame_extractor.py  #   dual-threshold scene detection + time fallback
 │   └── inference/              #   the vision models
 │       ├── detector.py         #   YOLOv8 object detection
+│       ├── weapon.py           #   fine-tuned YOLOv11m handgun/long_gun/knife
 │       ├── captioner.py        #   Qwen2.5-VL / BLIP / Ollama structured captions
 │       ├── embedder.py         #   CLIP image/text embeddings
 │       ├── ocr.py              #   PaddleOCR / Ollama text + plate reading
-│       └── pose.py             #   YOLO-pose + fall/fight/running rule engine
+│       ├── pose.py             #   YOLO-pose + fall/fight/running rule engine
+│       └── temporal_action.py  #   multi-frame pose actions buffered per track id
 │
 ├── retrieval/                  # index, search, answer
 │   ├── rag/
-│   │   ├── vector_store.py     #   ChromaDB wrapper + video registry
+│   │   ├── vector_store.py     #   ChromaDB wrapper + video registry + thumbnails
+│   │   ├── fts_index.py        #   persistent SQLite FTS5 lexical (BM25) index
 │   │   ├── retriever.py        #   hybrid CLIP + BM25 + cross-similarity re-rank
+│   │   ├── track_store.py      #   per-video tracks / events JSON
 │   │   └── summariser.py       #   windowed map-reduce streaming summariser + LLM
 │   ├── api/main.py             #   FastAPI endpoints + background ingestion (SSE)
 │   └── ui/app.py               #   legacy single-file Gradio UI (kept for reference)
 │
 ├── frontend/                   # Next.js UI (App Router + Tailwind)
 ├── tests/                      # unit tests (scene detection, parsing, pose rules, …)
-├── data/                       # RUNTIME volume — uploads, thumbs, chroma
+├── benchmarks/
+│   ├── real_bench.py           #   time + space of ONE real video, end to end
+│   └── scale_bench.py          #   synthetic storage/latency benchmark at 90-day scale
+├── data/                       # RUNTIME volume — uploads, thumbs, chroma, tracks
 ├── model-cache/                # RUNTIME volume — HuggingFace / torch / YOLO weights
 ├── Dockerfile                  # single image: perception + retrieval
 ├── docker-compose.yml          # api + web services, bind-mounted data & weights
@@ -217,15 +252,26 @@ default. The most useful:
 | `DIFF_THRESHOLD` / `HIST_THRESHOLD` | `0.08` / `0.15` | Scene-cut thresholds (diff ∧ χ²) |
 | `MIN_SCENE_GAP_SEC` / `MAX_GAP_SEC` | `1.0` / `3.0` | Keyframe cool-down / time-based fallback |
 | `MAX_KEYFRAMES` | `120` | Hard cap on keyframes per video |
+| `KEYFRAME_MODE` | `track` | `track` (YOLO+ByteTrack) \| `scene` (dual-threshold cuts) |
+| `TRACKER_CONFIG` | `botsort.yaml` | `botsort.yaml` (appearance ReID) \| `bytetrack.yaml` (faster) |
+| `TRACK_CLASSES` / `TRACK_IMGSZ` | `0,2,3,5,7` / `960` | COCO ids to track / tracking resolution |
 | `CAPTION_BACKEND` | `qwen` | `qwen` \| `blip` \| `auto` \| `ollama` |
+| `CAPTION_DEVICE` | `auto` | `auto` \| `cpu` \| `cuda` — force CPU on a tiny/shared GPU |
 | `QWEN_VL_MODEL` | `Qwen/Qwen2.5-VL-3B-Instruct` | Local VLM checkpoint |
-| `CAPTION_BATCH_SIZE` | `1` | Frames per forward pass (>1 = faster, more RAM) |
-| `CAPTION_MAX_NEW_TOKENS` | `256` | Max tokens per caption (JSON needs headroom) |
+| `CAPTION_BATCH_SIZE` | `1` | Frames per forward pass — **must stay 1 on 4 GB VRAM** |
+| `CAPTION_MAX_NEW_TOKENS` | `192` | Max tokens per caption |
+| `CAPTION_FORMAT` | `flat` | `flat` (`KEY: value`, robust) \| `json` (needs a capable model) |
 | `OLLAMA_CONCURRENCY` | `4` | Concurrent requests for the Ollama caption/OCR path |
 | `OCR_BACKEND` | `none` | `none` \| `paddle` \| `ollama` |
-| `POSE_ENABLED` | `false` | Enable YOLO-pose fall/fight/running events |
-| `RETRIEVAL_TOP_K` | `10` | Frames returned per query |
+| `POSE_ENABLED` | `false` | Single-frame YOLO-pose fall/fight/crowding events |
+| `POSE_ACTION_ENABLED` | `false` | Per-track temporal actions (fall/run/handshake/fight) |
+| `WEAPON_ENABLED` / `WEAPON_DEVICE` | `false` / `auto` | YOLOv11m weapon detection; `cpu` frees VRAM |
+| `CLIP_DEVICE` | `cpu` | Keep CLIP off the GPU so the caption VLM gets it all |
+| `RETRIEVAL_TOP_K` | `5` | Frames returned per query |
 | `SUMMARY_WINDOW_SEC` | `30` | Summarisation window size |
+
+> **4 GB GPU?** `CAPTION_BATCH_SIZE=1`, `CLIP_DEVICE=cpu` and `WEAPON_DEVICE=cpu`
+> are not arbitrary — see [AGENTS.md](AGENTS.md#2-the-constraint-that-explains-everything).
 
 ## Running inference on a remote server
 
@@ -257,12 +303,13 @@ stay local (they're light). A single dedicated GPU inference service that hosts
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/ingest` | Multipart video upload → `{job_id, video_id}` |
+| `POST` | `/ingest` | Multipart video (+ optional IVA `meta.jsonl` / `manifest.jsonl`) → `{job_id, video_id}` |
 | `GET` | `/status/{job_id}` | Ingestion job state + progress % |
-| `POST` | `/query` | `{video_id, question}` → SSE-streamed grounded answer |
+| `POST` | `/query` | `{video_id, question, t_start?, t_end?}` → SSE-streamed grounded answer |
 | `GET` | `/summary/{video_id}` | SSE-streamed chunked summary |
 | `GET` | `/clip/{video_id}?q=` | Best-matching moment: timestamp + thumbnail |
 | `GET` | `/frames/{video_id}` | All keyframes with timestamps + thumbnails |
+| `GET` | `/track_video/{video_id}` | Annotated tracking video (boxes + track IDs) |
 | `GET` | `/videos` | Registry of processed videos |
 | `DELETE` | `/videos/{video_id}` | Remove a video from the store |
 | `GET` | `/health` | Liveness probe |
@@ -283,12 +330,44 @@ cp -r ~/.cache/huggingface/hub  model-cache/huggingface/hub   # warmed cache
 
 ## Tests
 
+Dependencies are installed **inside the image**, not on the host — run pytest in
+the container:
+
 ```bash
-docker-compose exec api python -m pytest tests/ -q
+docker compose exec api python -m pytest tests/ -q
+docker compose exec api python -m pytest tests/ -q -m slow   # loads real weights
 ```
 
-Fast tests need no model weights — they cover scene-change detection, structured-
-JSON parsing/repair, OCR merging, and the pose rule engine with synthetic inputs.
+Fast tests need no model weights — they cover scene-change detection, structured
+caption parsing/repair, OCR merging, the pose rule engine, the FTS5 index, and
+hybrid retrieval, all on synthetic inputs. `pytest.ini` excludes `-m slow` by
+default.
+
+Several modules also carry a runnable self-check:
+
+```bash
+docker compose exec api python -m retrieval.rag.fts_index
+docker compose exec api python -m retrieval.rag.retriever <video_id> "<query>"
+```
+
+## Benchmarking your own video
+
+How long does *your* video take, and what does it cost on disk? Point
+`real_bench.py` at it while the stack is running — it drives the real pipeline
+through the API and needs no Python deps on the host:
+
+```bash
+docker compose up -d
+python3 benchmarks/real_bench.py my_video.mp4 --cleanup
+```
+
+It reports per-stage ingest timing (captioning usually dominates), per-keyframe
+storage split across Chroma / thumbnails / tracks, retrieval latency, and a
+**realtime factor** — above `1.0x` the box ingests slower than a camera records,
+which is the number that decides whether live capture is feasible.
+
+For DB and query cost at scale *without* waiting on the models, use the
+synthetic `benchmarks/scale_bench.py` instead (see [AGENTS.md](AGENTS.md#benchmarks)).
 
 ## Roadmap
 
@@ -296,7 +375,13 @@ JSON parsing/repair, OCR merging, and the pose rule engine with synthetic inputs
 - [x] Dedicated OCR (PaddleOCR / Ollama)
 - [x] Pose-based action rules (fall / fight / running / crowding)
 - [x] Batched & concurrent captioning
-- [ ] Object **tracking** (ByteTrack) → temporal event chains across frames
+- [x] Object **tracking** (ByteTrack / BoT-SORT) → temporal event chains across frames
+- [x] Weapon detection (fine-tuned YOLOv11m)
+- [x] Temporal, per-track pose actions (fall / running / handshake / fight)
+- [x] Persistent FTS5 lexical index + bounded candidate retrieval — **~68× smaller
+      vector DB, sub-second queries at 50k frames/video** ([details](AGENTS.md#measured-impact))
+- [ ] **Cross-video / multi-camera** search — retrieval is still per-`video_id`
+- [ ] **Streaming ingest** (live RTSP) instead of upload-then-process
 - [ ] Video-VLM on **clips** for true temporal understanding
 - [ ] A dedicated, containerized **GPU inference server** (all vision models behind one API)
 

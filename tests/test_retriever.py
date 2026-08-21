@@ -78,13 +78,36 @@ class FakeStore:
     def get_by_video_id(self, video_id: str) -> list[RetrievedFrame]:
         return [f.model_copy() for f in self.frames] if video_id == VIDEO_ID else []
 
-    def search_by_text(self, query, embedder, video_id, top_k=5):
+    def search_by_text(self, query, embedder, video_id, top_k=5, t_start=None, t_end=None):
         query_vec = embedder.embed_text(query)
         hits = []
         for frame in self.get_by_video_id(video_id):
+            if t_start is not None and frame.timestamp_sec < t_start:
+                continue
+            if t_end is not None and frame.timestamp_sec > t_end:
+                continue
             img_vec = l2_normalise(FRAME_IMAGE_VECS[frame.frame_idx])
             frame.score = float(query_vec @ img_vec)
             hits.append(frame)
+        hits.sort(key=lambda f: f.score, reverse=True)
+        return hits[:top_k]
+
+    def search_lexical(self, query, video_id, top_k=5, t_start=None, t_end=None):
+        """Stand-in FTS5 channel: score by caption+label token overlap."""
+        import re
+
+        q = set(re.findall(r"[a-z0-9]+", query.lower()))
+        hits = []
+        for frame in self.get_by_video_id(video_id):
+            if t_start is not None and frame.timestamp_sec < t_start:
+                continue
+            if t_end is not None and frame.timestamp_sec > t_end:
+                continue
+            body = (frame.caption + " " + " ".join(frame.detection_labels)).lower()
+            overlap = len(q & set(re.findall(r"[a-z0-9]+", body)))
+            if overlap:
+                frame.score = float(overlap)
+                hits.append(frame)
         hits.sort(key=lambda f: f.score, reverse=True)
         return hits[:top_k]
 
@@ -132,3 +155,10 @@ class TestHybridRetrieval:
         """Detection labels are folded into the BM25 corpus."""
         results = retriever.search(VIDEO_ID, "vehicle car")
         assert results[0].frame_idx == 1
+
+    def test_time_window_narrows_results(self, retriever: HybridRetriever) -> None:
+        """A [t_start, t_end] window restricts both channels to that range."""
+        results = retriever.search(VIDEO_ID, "car", t_start=8.0, t_end=12.0)
+        assert results
+        assert all(8.0 <= r.timestamp_sec <= 12.0 for r in results)
+        assert results[0].frame_idx == 1  # only the car frame (t=10) qualifies

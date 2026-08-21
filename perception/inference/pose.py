@@ -189,6 +189,23 @@ class PoseEstimator:
         self._model = YOLO(self.model_name)
         self._device = get_device()
 
+    def unload(self) -> None:
+        """Release the pose model from VRAM so the caption VLM gets the memory.
+
+        Lazy-reloaded on the next call — lets pose run 'at tracker time' and hand
+        its GPU budget to Qwen before captioning, instead of coexisting with it.
+        """
+        if self._model is None:
+            return
+        self._model = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     def estimate(self, image: Image.Image) -> list[Person]:
         return self.estimate_batch([image])[0]
 
