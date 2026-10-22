@@ -136,6 +136,7 @@ foundation.
 
 ```bash
 git clone <your-repo-url> && cd VSS
+cp .env.example .env       # then edit; defaults run offline on CPU + Ollama
 ./build.sh                 # checks prerequisites, builds, and starts the stack
 #   or:  docker-compose up --build
 #   clean rebuild:  ./build.sh --no-cache
@@ -240,7 +241,7 @@ VSS/
 
 ## Configuration
 
-All settings are environment variables (see `.env`); every one has a sensible
+All settings are environment variables (template: `.env.example`); every one has a sensible
 default. The most useful:
 
 | Name | Default | Description |
@@ -395,4 +396,4 @@ Built on [Ultralytics YOLO](https://github.com/ultralytics/ultralytics),
 
 ## License
 
-Released under the **MIT License** — add a `LICENSE` file to make it official.
+Released under the [MIT License](LICENSE).
