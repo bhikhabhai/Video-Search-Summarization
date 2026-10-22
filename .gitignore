@@ -14,3 +14,5 @@ frontend/next-env.d.ts
 
 model-cache/
 model-cache/*
+*.AVI
+*.avi
