@@ -247,7 +247,7 @@ default. The most useful:
 | Name | Default | Description |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | *(empty)* | If set, use Anthropic for Q&A/summaries; else Ollama |
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | LLM (Q&A/summary) endpoint |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | LLM (Q&A/summary) endpoint; in Docker use `http://host.docker.internal:11434` for a host-side Ollama (as in `.env.example`) |
 | `OLLAMA_MODEL` | `llama3.2` | Ollama text model |
 | `MAX_VIDEO_SECONDS` / `MAX_VIDEO_MB` | `500` / `300` | Upload limits |
 | `DIFF_THRESHOLD` / `HIST_THRESHOLD` | `0.08` / `0.15` | Scene-cut thresholds (diff ∧ χ²) |
