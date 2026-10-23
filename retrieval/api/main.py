@@ -23,6 +23,7 @@ import difflib
 import io
 import json
 import logging
+import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -100,9 +101,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     global PIPELINE
     configure_logging()
     PIPELINE = Pipeline()
+    _purge_orphans(PIPELINE.store)
     logger.info("Mini-VSS API ready")
     yield
     _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+
+
+def _delete_video_files(video_id: str) -> None:
+    """Best-effort removal of a video's on-disk files (upload + IVA sidecars,
+    track summary, annotated tracking video)."""
+    settings = get_settings()
+    for path in settings.uploads_dir.glob(f"{video_id}.*"):
+        try:
+            path.unlink()
+        except OSError:
+            logger.warning("Could not delete upload %s", path)
+    track_store.delete_tracks(video_id)
+    (settings.data_dir / "tracks_video" / f"{video_id}.mp4").unlink(missing_ok=True)
+
+
+def _purge_orphans(store) -> None:
+    """Delete data left by ingests that never registered (crash / restart
+    mid-job). Runs at startup, before any job can be in flight."""
+    settings = get_settings()
+    known = {v.video_id for v in store.list_videos()}
+    on_disk = (
+        list(settings.uploads_dir.glob("*"))
+        + list((settings.data_dir / "tracks_video").glob("*.mp4"))
+        + list((settings.data_dir / "tracks").glob("*.json"))
+        + [d for d in store.thumbs_dir.glob("*") if d.is_dir()]
+    )
+    ids = {p.name.split(".", 1)[0] for p in on_disk}
+    orphans = {i for i in ids if re.fullmatch(r"[0-9a-f]{12}", i)} - known
+    for video_id in orphans:
+        store.delete_video(video_id)
+        _delete_video_files(video_id)
+    if orphans:
+        logger.info("Purged %d orphaned video(s): %s", len(orphans), sorted(orphans))
 
 
 app = FastAPI(title="Mini-VSS", version="0.1.0", lifespan=lifespan)
@@ -436,6 +471,9 @@ def _run_ingest(
         logger.exception("[job %s] ingestion failed", job_id)
         status.state = JobState.ERROR
         status.error = str(exc)
+        # Never registered -> invisible in the UI, so drop everything it wrote.
+        p.store.delete_video(status.video_id)
+        _delete_video_files(status.video_id)
         status.message = "failed"
 
 
@@ -809,18 +847,7 @@ async def delete_video(video_id: str) -> dict:
         # Nothing in Chroma and nothing in the registry -> genuinely unknown.
         raise HTTPException(404, f"Unknown video {video_id}")
 
-    # Best-effort removal of the uploaded source file(s).
-    settings = get_settings()
-    for path in settings.uploads_dir.glob(f"{video_id}.*"):
-        try:
-            path.unlink()
-        except OSError:
-            logger.warning("Could not delete upload %s", path)
-    track_store.delete_tracks(video_id)
-    (settings.data_dir / "tracks_video" / f"{video_id}.mp4").unlink(missing_ok=True)
-    (settings.uploads_dir / f"{video_id}.meta.jsonl").unlink(missing_ok=True)
-    (settings.uploads_dir / f"{video_id}.manifest.jsonl").unlink(missing_ok=True)
-
+    _delete_video_files(video_id)
     return {"video_id": video_id, "deleted_frames": deleted}
 
 
