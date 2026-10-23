@@ -319,7 +319,7 @@ stay local (they're light). A single dedicated GPU inference service that hosts
 
 Weights load from the bind-mounted `./model-cache` directory, so they persist on
 the host and are **never re-downloaded** on rebuild. The image points every cache
-there (`HF_HOME`, `TRANSFORMERS_CACHE`, `TORCH_HOME`, `YOLO_CONFIG_DIR` →
+there (`HF_HOME`, `TORCH_HOME`, `YOLO_CONFIG_DIR` →
 `/app/model-cache/...`).
 
 **Pre-populate the cache** to skip the first-run download:

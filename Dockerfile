@@ -40,7 +40,6 @@ COPY retrieval/ retrieval/
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/app/model-cache/huggingface \
-    TRANSFORMERS_CACHE=/app/model-cache/huggingface \
     TORCH_HOME=/app/model-cache/torch \
     YOLO_CONFIG_DIR=/app/model-cache/ultralytics \
     NVIDIA_VISIBLE_DEVICES=all \

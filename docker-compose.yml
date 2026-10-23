@@ -11,7 +11,6 @@ services:
       - PYTHONPATH=/app
       # HuggingFace models load from the mounted cache — no re-downloads.
       - HF_HOME=/app/model-cache/huggingface
-      - TRANSFORMERS_CACHE=/app/model-cache/huggingface
       - TORCH_HOME=/app/model-cache/torch
       - YOLO_CONFIG_DIR=/app/model-cache/ultralytics
       - DATA_DIR=/app/data
